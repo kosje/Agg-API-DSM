@@ -2,12 +2,12 @@
   "packages": [
     {
       "package": "agg-api-dsm",
-      "version": "0.6.0-0001",
+      "version": "0.8.0-0001",
       "dname": "Agg-API-DSM",
       "desc": "Agg-API-DSM 本地网关（群晖 DSM 版）。一个套件同时提供两个上游：Agnes AI 与 M365 Copilot。下游只认一个地址、一个 API Key，由模型名决定走哪条链路（agnes-* / copilot-*）。两个上游共用同一套账号池与 RPM 限流节拍：账号轮换、失败冷却、按负载选账号都是共享的。自带 Web 管理控制台：上游状态、账号管理（Copilot 走浏览器授权，无需设备码）、下游 API Key 管理。服务端口 4444，安装向导可设置管理员口令。升级请在套件中心安装新版 SPK。",
-      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.6.0/agg-api-dsm-0.6.0.spk",
-      "md5": "a776b8fe93173574eb8cbe7cf5a1b56f",
-      "size": 4126720,
+      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.8.0/agg-api-dsm-0.8.0.spk",
+      "md5": "be14b5b3634a1aec9159d5a7f06d89b9",
+      "size": 4136960,
       "thumbnail": [
         "https://kosje.github.io/Agg-API-DSM/icon_72.png"
       ],
@@ -22,7 +22,7 @@
       "maintainer_url": "https://github.com/kosje/Agg-API-DSM",
       "distributor": "kosje",
       "distributor_url": "https://github.com/kosje/Agg-API-DSM",
-      "changelog": "模型清单对齐真实来源（Agnes 查上游 /v1/models，微软补全到 21 个）；控制台改卡片式布局，模型用标签呈现。"
+      "changelog": "生图改为内联返回图片本体（不再返回 URL，客户端一次拿到）；修请求超时（15 分钟挂死）；实现 /v1/images/generations。"
     }
   ]
 }
