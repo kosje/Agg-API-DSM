@@ -85,32 +85,63 @@ func chunkToOpenAI(model, id string, first bool, delta provider.StreamChunk) map
 //   - 已经开始流式之后失败 → 发一条 error 事件，再补 [DONE] 收尾，
 //     否则客户端会一直等一个永远不来的结束标记
 func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request,
-	up provider.Provider, model, publicModel string, req *provider.ChatRequest) {
+	up provider.Provider, model, publicModel string, req *provider.ChatRequest,
+	sessionKey string) {
 
 	ch := make(chan provider.StreamChunk, 8)
 	ctx := r.Context()
 
-	// 上游产出与下游写入解耦：上游写 channel，这里读。
-	// 缓冲 8 是折中 —— 太小会让上游阻塞在写上，太大则首字延迟变高。
-	go up.ChatStream(ctx, req, ch)
+	// 领账号 + 取第一个分片，失败就换账号重试。
+	//
+	// 为什么要在这里重试：流式的错误大多在第一个分片就暴露（鉴权、限流），
+	// 那时响应头还没发出去，换账号是可行的。一旦开始往客户端写正文，
+	// 就再也改不了响应，只能把错误塞进流里。
+	var (
+		lease   provider.Lease
+		first   provider.StreamChunk
+		tried   []string
+		lastErr error
+		ok      bool
+	)
+	for attempt := 0; attempt <= h.maxRetries; attempt++ {
+		lease, lastErr = up.Acquire(ctx, sessionKey, tried...)
+		if lastErr != nil {
+			break
+		}
+		req.Credential = lease.Credential()
 
-	// 先取第一个分片再决定怎么响应。
-	// 这一步是刻意的：很多错误（鉴权失败、模型不存在）会在第一个分片就暴露，
-	// 那时响应头还没发，可以老老实实返回 4xx/5xx，比在流里塞错误好得多。
-	var first provider.StreamChunk
-	var ok bool
-	select {
-	case first, ok = <-ch:
-		if !ok {
-			writeAPIError(w, &APIError{Code: http.StatusBadGateway,
-				Message: "上游没有返回任何内容", Type: "upstream_error"})
+		// 上游产出与下游写入解耦：上游写 channel，这里读。
+		// 缓冲 8 是折中 —— 太小会让上游阻塞在写上，太大则首字延迟变高。
+		ch = make(chan provider.StreamChunk, 8)
+		go up.ChatStream(ctx, req, ch)
+
+		select {
+		case first, ok = <-ch:
+			if !ok {
+				lastErr = fmt.Errorf("上游没有返回任何内容")
+			} else {
+				lastErr = first.Err
+			}
+		case <-ctx.Done():
+			lease.Release(ctx.Err())
 			return
 		}
-	case <-ctx.Done():
-		return
+		// 账号一直用到流结束才归还：提前归还的话，池子会以为它空闲了，
+		// 可能同时把这个账号再发给别的请求。
+		lease.Release(lastErr)
+		if lastErr == nil {
+			break
+		}
+		tried = append(tried, lease.AccountID())
+		if !retriable(lastErr) {
+			break
+		}
+		if attempt < h.maxRetries {
+			time.Sleep(backoff(attempt))
+		}
 	}
-	if first.Err != nil {
-		writeAPIError(w, errorBody(first.Err))
+	if lastErr != nil {
+		writeAPIError(w, errorBody(lastErr))
 		return
 	}
 

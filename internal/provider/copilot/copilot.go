@@ -145,8 +145,8 @@ func (p *Provider) PoolStats() []pool.AccountStat { return p.pool.Stats() }
 func (p *Provider) Revive(id string) bool { return p.pool.Revive(id) }
 
 // Acquire 从账号池领一个账号。
-func (p *Provider) Acquire(ctx context.Context, sessionKey string) (provider.Lease, error) {
-	lease, err := p.pool.Acquire(ctx, sessionKey, 0, 0)
+func (p *Provider) Acquire(ctx context.Context, sessionKey string, exclude ...string) (provider.Lease, error) {
+	lease, err := p.pool.Acquire(ctx, sessionKey, 0, 0, exclude...)
 	if err != nil {
 		// 不再把内层 err 也拼进去：它是 "没有可用账号"，
 		// 和这里的措辞重复，读起来像 "没有可用账号（没有可用账号）"。
@@ -161,21 +161,34 @@ func (p *Provider) AccountStats() []provider.AccountStat {
 	stats := p.pool.Stats()
 	out := make([]provider.AccountStat, 0, len(stats))
 	for _, s := range stats {
-		out = append(out, provider.AccountStat{
+		item := provider.AccountStat{
 			ID:          s.ID,
 			Name:        s.Name,
 			Healthy:     s.Healthy,
 			Strikes:     s.Strikes,
 			RPM:         int(s.RPM),
 			Waiting:     s.Waiting,
+			InFlight:    s.InFlight,
 			CooldownSec: int(s.Cooldown / 1e9),
-		})
+			Requests:    s.Stats.Requests,
+			Errors:      s.Stats.Errors,
+			RateLimited: s.Stats.RateLimited,
+			AuthFailed:  s.Stats.AuthFailed,
+			LastError:   s.Stats.LastError,
+		}
+		if !s.Stats.LastUsedAt.IsZero() {
+			item.LastUsedAt = s.Stats.LastUsedAt.Format(time.RFC3339)
+		}
+		out = append(out, item)
 	}
 	return out
 }
 
 // ReviveAccount 实现 provider.PoolReporter。
 func (p *Provider) ReviveAccount(id string) bool { return p.pool.Revive(id) }
+
+// ResetAccountStats 实现 provider.PoolReporter。
+func (p *Provider) ResetAccountStats(id string) bool { return p.pool.ResetStats(id) }
 
 func (p *Provider) Name() string        { return "copilot" }
 func (p *Provider) DisplayName() string { return "M365 Copilot" }

@@ -32,7 +32,7 @@ import (
 )
 
 // 版本号单一来源：发版脚本读这一行。
-var version = "0.4.0"
+var version = "0.5.0"
 
 // 默认端口。刻意避开两个上游各自占用的 4141（M365）与 4142（Agnes）：
 // 合并后只装这一个套件，但如果用户机器上还留着旧的单上游套件，
@@ -131,7 +131,11 @@ func main() {
 		return true
 	}
 
-	gateway.NewHandler(router, authorize).Register(mux)
+	gh := gateway.NewHandler(router, authorize)
+	// 重试次数来自配置 —— 它是「账号轮询」生效的关键：
+	// 设成 0 等于关掉轮询，一次失败就直接把错误抛给下游。
+	gh.SetMaxRetries(store.Settings.MaxRetries)
+	gh.Register(mux)
 
 	// 管理 API 与控制台。
 	gateway.NewAdmin(store, router).Register(mux)

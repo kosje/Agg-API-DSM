@@ -153,15 +153,24 @@ async function refresh() {
   const pools = (st.providers || []).filter(p => p.accounts && p.accounts.length);
   $('poolBox').innerHTML = pools.map(p => `
     <h3 style="font-size:13px;font-weight:500;margin:14px 0 6px">${esc(p.display_name)} 账号池</h3>
-    <table><thead><tr><th>账号</th><th>状态</th><th>RPM</th><th>排队</th><th>连续失败</th><th></th></tr></thead>
+    <table><thead><tr>
+      <th>账号</th><th>状态</th><th>RPM</th><th>并发</th><th>排队</th><th>连续失败</th>
+      <th>请求</th><th>错误</th><th>被限流</th><th>最后错误</th><th></th>
+    </tr></thead>
     <tbody>${p.accounts.map(a => `
       <tr>
         <td>${esc(a.name)}</td>
         <td class="${a.healthy ? 'ok' : 'bad'}">${a.healthy ? '可用' : '冷却 ' + a.cooldown_sec + 's'}</td>
         <td>${a.rpm || '不限'}</td>
+        <td>${a.in_flight || 0}</td>
         <td>${a.waiting || 0}</td>
         <td>${a.strikes || 0}</td>
-        <td>${a.healthy ? '' : `<button onclick="revive('${esc(p.name)}','${esc(a.id)}')">立即复活</button>`}</td>
+        <td>${a.requests || 0}</td>
+        <td class="${a.errors ? 'bad' : ''}">${a.errors || 0}</td>
+        <td class="${a.rate_limited ? 'bad' : ''}">${a.rate_limited || 0}</td>
+        <td class="muted" title="${esc(a.last_error || '')}">${esc((a.last_error || '').slice(0, 40))}</td>
+        <td>${a.healthy ? '' : `<button onclick="revive('${esc(p.name)}','${esc(a.id)}')">复活</button>`}
+            ${a.requests ? `<button onclick="resetStats('${esc(p.name)}','${esc(a.id)}')">清统计</button>` : ''}</td>
       </tr>`).join('')}</tbody></table>`).join('');
 
   $('tbAccounts').innerHTML = (st.accounts || []).map(a => `
@@ -182,6 +191,10 @@ async function refresh() {
 window.delAccount = async id => { if (!confirm('删除这个账号？')) return; await api('/api/accounts/delete?id=' + encodeURIComponent(id), { method: 'POST' }); refresh(); };
 window.revive = async (provider, id) => {
   await api('/api/revive?provider=' + encodeURIComponent(provider) + '&id=' + encodeURIComponent(id), { method: 'POST' });
+  refresh();
+};
+window.resetStats = async (provider, id) => {
+  await api('/api/revive?provider=' + encodeURIComponent(provider) + '&id=' + encodeURIComponent(id) + '&stats=1', { method: 'POST' });
   refresh();
 };
 window.delKey = async id => { if (!confirm('删除这个 Key？客户端会立刻失效。')) return; await api('/api/keys/delete?id=' + encodeURIComponent(id), { method: 'POST' }); refresh(); };

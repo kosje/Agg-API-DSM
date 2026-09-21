@@ -153,6 +153,11 @@ type Health struct {
 type Lease interface {
 	// Credential 返回本次要用的账号，填进 ChatRequest.Credential。
 	Credential() any
+	// AccountID 返回本次占用的账号 ID。
+	//
+	// 重试循环靠它把刚失败的账号排除掉 —— 没有它就只能「原样重试」，
+	// 那不叫轮询，只是把同一个失败重复一遍。
+	AccountID() string
 	// Release 归还账号。err 为 nil 表示这次调用成功。
 	Release(err error)
 }
@@ -174,7 +179,9 @@ type Provider interface {
 	//
 	// sessionKey 用于软粘性：同一会话优先复用上次成功的账号。
 	// 传空字符串表示不需要粘性。
-	Acquire(ctx context.Context, sessionKey string) (Lease, error)
+	//
+	// exclude 里的账号会被跳过，供重试循环避开刚失败的账号。
+	Acquire(ctx context.Context, sessionKey string, exclude ...string) (Lease, error)
 	// Sync 让 provider 重新读取配置（账号增删改后调用）。
 	Sync()
 	// Chat 执行一次对话。ctx 取消时必须尽快返回。
@@ -224,8 +231,18 @@ type AccountStat struct {
 	Strikes int    `json:"strikes"`
 	RPM     int    `json:"rpm"`
 	Waiting int    `json:"waiting"`
+	// InFlight 是当前正在进行的请求数。
+	InFlight int `json:"in_flight"`
 	// CooldownSec 是剩余冷却秒数，0 表示健康。
 	CooldownSec int `json:"cooldown_sec"`
+	// 累计用量。对照 agnes 的 AccountStats，用于回答
+	// 「这个账号用得多不多、有没有在报错、被限流过几次」。
+	Requests    int64  `json:"requests"`
+	Errors      int64  `json:"errors"`
+	RateLimited int64  `json:"rate_limited"`
+	AuthFailed  int64  `json:"auth_failed"`
+	LastError   string `json:"last_error,omitempty"`
+	LastUsedAt  string `json:"last_used_at,omitempty"`
 }
 
 // PoolReporter 是能报告账号池状态的上游。
@@ -238,6 +255,8 @@ type PoolReporter interface {
 	AccountStats() []AccountStat
 	// ReviveAccount 手动把一个冷却中的账号放出来。
 	ReviveAccount(id string) bool
+	// ResetAccountStats 清空一个账号的累计用量。
+	ResetAccountStats(id string) bool
 }
 
 // 网关层的通用错误。上游实现应当用这些包装，便于网关统一映射成 HTTP 状态码。

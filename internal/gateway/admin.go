@@ -476,6 +476,16 @@ func (a *Admin) handleRevive(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errObj("该上游不支持账号池操作"))
 			return
 		}
+		// ?stats=1 走清统计，否则是复活账号。合成一个端点是因为
+		// 两者都作用于「单个账号」，拆开只是多一个 URL。
+		if r.URL.Query().Get("stats") == "1" {
+			if !pr.ResetAccountStats(id) {
+				writeJSON(w, http.StatusNotFound, errObj("账号不存在"))
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
 		if !pr.ReviveAccount(id) {
 			writeJSON(w, http.StatusNotFound, errObj("账号不存在"))
 			return

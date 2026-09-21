@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"aggapi/internal/provider"
 )
@@ -82,6 +83,8 @@ type Handler struct {
 	router *Router
 	// authorize 校验下游 API Key。返回 false 时已经写过响应。
 	authorize func(http.ResponseWriter, *http.Request) bool
+	// maxRetries 是单次请求最多换几个账号重试。
+	maxRetries int
 }
 
 // NewHandler 构造入口。authorize 传 nil 表示不校验（仅供本机调试）。
@@ -89,7 +92,44 @@ func NewHandler(r *Router, authorize func(http.ResponseWriter, *http.Request) bo
 	if authorize == nil {
 		authorize = func(http.ResponseWriter, *http.Request) bool { return true }
 	}
-	return &Handler{router: r, authorize: authorize}
+	return &Handler{router: r, authorize: authorize, maxRetries: 2}
+}
+
+// SetMaxRetries 调整重试次数（来自 settings.max_retries）。
+func (h *Handler) SetMaxRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	h.maxRetries = n
+}
+
+// retriable 判断一个错误是否值得换个账号重试。
+//
+// 这个判断很重要 —— 盲目重试会把「本来就不该重试」的错误放大：
+//   - 凭据失效：换个账号也没用，得人去重新授权。重试只会白烧配额
+//   - 能力不支持：请求本身有问题，重试还是同样结果
+//   - 没配额 / 上游错误：值得换个账号试，这才是轮询的意义
+func retriable(err error) bool {
+	switch {
+	case errors.Is(err, provider.ErrNoCapacity):
+		return true
+	case errors.Is(err, provider.ErrUpstream):
+		return true
+	case errors.Is(err, provider.ErrAuth):
+		return false
+	case errors.Is(err, provider.ErrUnsupported):
+		return false
+	default:
+		return false
+	}
+}
+
+// backoff 是换账号重试之间的退避。
+//
+// 线性而不是指数：账号池通常就几个账号，重试次数很少，
+// 指数退避在这里只会让用户多等，收益不明显。
+func backoff(attempt int) time.Duration {
+	return time.Duration(300+attempt*400) * time.Millisecond
 }
 
 // Register 把端点挂到 mux 上。
@@ -202,35 +242,52 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 从账号池领一个账号。这一步同时完成限流排队与熔断跳过 ——
-	// 网关不关心池是怎么实现的，provider 也不重复实现它。
+	// 从账号池领一个账号并转发，失败就换一个账号重试。
+	//
+	// 这个循环是「账号轮询」真正生效的地方 —— 只 Acquire 一次的话，
+	// 挑中一个坏账号就直接把错误抛给下游，池子形同虚设。
 	preq := toProviderRequest(req, model)
 	preq.Images = images
 	attachDocs(preq, docText)
-	lease, err := up.Acquire(r.Context(), sessionKey(r, preq))
-	if err != nil {
-		writeAPIError(w, errorBody(err))
-		return
-	}
-	preq.Credential = lease.Credential()
-	// 流式请求要一直用到连接结束才归还账号，否则账号会在流还没结束时
-	// 被池子判成空闲、同时发给别的请求。非流式路径在下面立即归还。
 	preq.Stream = req.Stream
 
 	if req.Stream {
-		// 流式的成败由 streamChat 内部判断：它会把错误写进流里，
-		// 所以这里拿不到明确的 err。约定是「返回即代表这次账号调用结束」，
-		// 用 nil 归还 —— 真正的失败已经通过流告诉客户端了。
-		defer lease.Release(nil)
-		h.streamChat(w, r, up, model.Upstream, req.Model, preq)
+		h.streamChat(w, r, up, model.Upstream, req.Model, preq, sessionKey(r, preq))
 		return
 	}
 
-	resp, err := up.Chat(r.Context(), preq)
-	// 无论成败都必须归还：漏掉一次，账号池就永久少一个账号。
-	lease.Release(err)
-	if err != nil {
-		writeAPIError(w, errorBody(err))
+	var (
+		resp    *provider.ChatResponse
+		lastErr error
+		tried   []string
+	)
+	for attempt := 0; attempt <= h.maxRetries; attempt++ {
+		lease, aerr := up.Acquire(r.Context(), sessionKey(r, preq), tried...)
+		if aerr != nil {
+			// 池里已经没别的账号可用了：把最后一次的上游错误报出去，
+			// 那比「没有可用账号」更能说明问题。
+			if lastErr != nil {
+				break
+			}
+			writeAPIError(w, errorBody(aerr))
+			return
+		}
+		preq.Credential = lease.Credential()
+		resp, lastErr = up.Chat(r.Context(), preq)
+		lease.Release(lastErr)
+		if lastErr == nil {
+			break
+		}
+		tried = append(tried, lease.AccountID())
+		if !retriable(lastErr) {
+			break
+		}
+		if attempt < h.maxRetries {
+			time.Sleep(backoff(attempt))
+		}
+	}
+	if lastErr != nil {
+		writeAPIError(w, errorBody(lastErr))
 		return
 	}
 

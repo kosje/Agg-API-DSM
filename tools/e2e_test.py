@@ -269,6 +269,51 @@ def main():
         path = recv2[-1]["path"] if recv2 else "?"
         check("base_url 带 /v1 时路径不重复", path == "/v1/chat/completions", path)
 
+        print("9) 账号轮询：第一个账号坏了，应自动换第二个")
+        # 账号 1 指向一个没人监听的端口（必然失败），账号 2 指向 mock。
+        # 轮询若生效，请求应该成功；若没生效，会把账号 1 的错误直接抛出来。
+        cfg["accounts"] = [
+            {"id": "acc-bad", "provider": "agnes", "name": "坏账号",
+             "base_url": "http://127.0.0.1:19999", "api_key": "sk-bad",
+             "models": ["agnes-auto"], "enabled": True, "rpm": 0,
+             "created_at": "2026-09-21T00:00:00Z"},
+            {"id": "acc-good", "provider": "agnes", "name": "好账号",
+             "base_url": "http://127.0.0.1:%d" % MOCK_PORT, "api_key": "sk-good",
+             "models": ["agnes-auto"], "enabled": True, "rpm": 0,
+             "created_at": "2026-09-21T00:00:00Z"},
+        ]
+        with open(os.path.join(TMP, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        gw.terminate(); gw.wait(timeout=10)
+        gw = subprocess.Popen([os.path.join(ROOT, "dist", "agg-api" + (".exe" if os.name == "nt" else "")),
+                               "-port", str(GW_PORT), "-data", TMP],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+        st, body = http("POST", base + "/v1/chat/completions",
+                        {"model": "agnes-auto",
+                         "messages": [{"role": "user", "content": "轮询测试"}]})
+        check("坏账号在前时请求仍成功", st == 200, "%s %s" % (st, str(body)[:120]))
+        st2, recv3 = http("GET", "http://127.0.0.1:%d/__received" % MOCK_PORT)
+        hit = any("轮询测试" in json.dumps(r["body"], ensure_ascii=False) for r in recv3)
+        check("请求确实落到了第二个账号", hit, "mock 收到 %d 条" % len(recv3))
+
+        print("9b) 全坏时不该无限重试")
+        cfg["accounts"] = [cfg["accounts"][0]]
+        with open(os.path.join(TMP, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        gw.terminate(); gw.wait(timeout=10)
+        gw = subprocess.Popen([os.path.join(ROOT, "dist", "agg-api" + (".exe" if os.name == "nt" else "")),
+                               "-port", str(GW_PORT), "-data", TMP],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+        t0 = time.time()
+        st, body = http("POST", base + "/v1/chat/completions",
+                        {"model": "agnes-auto",
+                         "messages": [{"role": "user", "content": "hi"}]})
+        el = time.time() - t0
+        check("全坏时返回上游错误", st == 502, "%s" % st)
+        check("有限时间内返回（%.1fs）" % el, el < 30, "%.1fs" % el)
+
     finally:
         for p in (gw, mock):
             try:
