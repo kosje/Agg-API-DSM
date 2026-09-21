@@ -17,3 +17,6 @@
 __pycache__/
 *.log
 /.e2e-data/
+
+# 临时验证目录
+/.verify/
