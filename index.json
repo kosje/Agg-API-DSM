@@ -2,11 +2,11 @@
   "packages": [
     {
       "package": "agg-api-dsm",
-      "version": "0.4.0-0001",
+      "version": "0.5.0-0001",
       "dname": "Agg-API-DSM",
       "desc": "Agg-API-DSM 本地网关（群晖 DSM 版）。一个套件同时提供两个上游：Agnes AI 与 M365 Copilot。下游只认一个地址、一个 API Key，由模型名决定走哪条链路（agnes-* / copilot-*）。两个上游共用同一套账号池与 RPM 限流节拍：账号轮换、失败冷却、按负载选账号都是共享的。自带 Web 管理控制台：上游状态、账号管理（Copilot 走浏览器授权，无需设备码）、下游 API Key 管理。服务端口 4444，安装向导可设置管理员口令。升级请在套件中心安装新版 SPK。",
-      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.4.0/agg-api-dsm-0.4.0.spk",
-      "md5": "c2fe0f24a140b2b9699fb4c5c2ddfaa9",
+      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.5.0/agg-api-dsm-0.5.0.spk",
+      "md5": "82aa554f146e5cf241068c0459d9719b",
       "size": 4116480,
       "thumbnail": [
         "https://kosje.github.io/Agg-API-DSM/icon_72.png"
@@ -22,7 +22,7 @@
       "maintainer_url": "https://github.com/kosje/Agg-API-DSM",
       "distributor": "kosje",
       "distributor_url": "https://github.com/kosje/Agg-API-DSM",
-      "changelog": "模型名对齐微软真实叫法（gpt-5.5 / claude-sonnet 等）；修 Agnes 在控制台不显示；修模型选择被静默换成智能路由的隐患。"
+      "changelog": "账号轮询真正生效（跨账号重试）；补上账号用量统计与配额显示；按错误类型给不同冷却时长；加单账号并发上限。"
     }
   ]
 }
