@@ -182,33 +182,9 @@ func (p *Provider) DisplayName() string { return "M365 Copilot" }
 
 // Models 返回 Copilot 侧对外暴露的模型。
 //
-// 命名前缀 copilot- 与 Agnes 侧的 agnes- 刻意区分开：
-// 模型名是路由的唯一依据，前缀让用户在客户端里一眼看出走的是哪条链路。
-func (p *Provider) Models() []provider.Model {
-	// 没配账号时也列出模型，让用户能在客户端里先看到链路存在，
-	// 而不是连模型名都找不到、不知道该填什么。
-	return []provider.Model{
-		{
-			ID:       "copilot-auto",
-			Upstream: "auto",
-			Caps: provider.CapText | provider.CapImage | provider.CapVision |
-				provider.CapDoc | provider.CapStream,
-			Desc: "Copilot 智能路由（含生图与文档解析）",
-		},
-		{
-			ID:       "copilot-chat",
-			Upstream: "chat",
-			Caps:     provider.CapText | provider.CapVision | provider.CapDoc | provider.CapStream,
-			Desc:     "纯文本对话",
-		},
-		{
-			ID:       "copilot-image",
-			Upstream: "image",
-			Caps:     provider.CapImage,
-			Desc:     "图片生成",
-		},
-	}
-}
+// 用微软那边的真实叫法（gpt-5.5 / claude-sonnet / ...），不用自造名 ——
+// 客户端里看到 copilot-chat 这种名字，没人知道它对应哪个模型。
+func (p *Provider) Models() []provider.Model { return models() }
 
 // Health 用账号池的真实状态报告健康。
 func (p *Provider) Health() provider.Health {
@@ -242,36 +218,6 @@ const (
 	defaultTone        = "magic"
 )
 
-// toneFor 把对外模型名映射成上游的 tone。
-//
-// 上游用 tone 区分模型与推理深度，不是用模型名。未识别的名字一律回落到
-// "magic"，即交给上游自己智能路由 —— 比猜一个具体 tone 更稳。
-func toneFor(model string) string {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "gpt-5.2":
-		return "Gpt_5_2_Chat"
-	case "gpt-5.2-reasoning":
-		return "Gpt_5_2_Reasoning"
-	case "gpt-5.3":
-		return "Gpt_5_3_Chat"
-	case "gpt-5.4":
-		return "Gpt_5_4_Chat"
-	case "gpt-5.4-reasoning":
-		return "Gpt_5_4_Reasoning"
-	case "gpt-5.5":
-		return "Gpt_5_5_Chat"
-	case "gpt-5.5-reasoning":
-		return "Gpt_5_5_Reasoning"
-	case "gpt-5.6-reasoning":
-		return "Gpt_5_6_Reasoning"
-	case "claude", "claude-sonnet":
-		return "Claude_Sonnet"
-	case "claude-sonnet-reasoning":
-		return "Claude_Sonnet_Reasoning"
-	default:
-		return defaultTone
-	}
-}
 
 // extractOIDTID 从 access_token 里解出 oid / tid。
 //
@@ -389,6 +335,16 @@ func classifyChatErr(err error) error {
 	return fmt.Errorf("%w：%v", provider.ErrUpstream, err)
 }
 
+// firstNonEmptyTone 空值时回落到智能路由。
+//
+// 上游把 tone 当必填，空值会被拒；回落成 magic 至少能出一个合理的结果。
+func firstNonEmptyTone(tone string) string {
+	if strings.TrimSpace(tone) == "" {
+		return defaultTone
+	}
+	return tone
+}
+
 // buildRequest 把归一化请求翻译成 chathub 的请求。
 //
 // Chat 与 ChatStream 共用 —— 两条路径的字段必须完全一致，
@@ -396,8 +352,12 @@ func classifyChatErr(err error) error {
 func buildRequest(req *provider.ChatRequest) chathub.Request {
 	return chathub.Request{
 		Text: joinMessages(req.Messages),
-		// Tone 决定上游用哪个模型、多深的推理。缺了会被上游拒绝。
-		Tone: toneFor(req.Model),
+		// Tone 决定上游用哪个模型、多深的推理。
+		//
+		// req.Model 到这里已经是**上游标识（tone）**了 —— 网关按
+		// provider.Model.Upstream 填的。不要再做一次名字->tone 的映射，
+		// 那会把 "Gpt_5_5_Chat" 当成未知名字、退回 magic，用户选的模型就丢了。
+		Tone: firstNonEmptyTone(req.Model),
 		// Scenario 与 LicenseType 同样是上游的必填项，它没有默认值可用 ——
 		// 留空会被直接拒，且上游返回的错误很难懂。
 		Scenario:    defaultScenario,

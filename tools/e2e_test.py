@@ -115,7 +115,7 @@ def main():
 
         print("3) 未配置账号的上游应返回 503 且点明是哪个上游")
         st, body = http("POST", base + "/v1/chat/completions",
-                        {"model": "copilot-chat", "messages": [{"role": "user", "content": "hi"}]})
+                        {"model": "gpt-5.5", "messages": [{"role": "user", "content": "hi"}]})
         check("无账号返回 503", st == 503, "%s" % st)
         msg = body.get("error", {}).get("message", "")
         check("错误信息点明上游", "M365 Copilot" in msg, msg)
@@ -147,7 +147,7 @@ def main():
                 {
                     "id": "acc-2", "provider": "copilot", "name": "Copilot 账号",
                     "auth": {"token": "fake"},
-                    "models": ["copilot-chat"],
+                    "models": ["gpt-5.5"],
                     "enabled": True, "rpm": 0,
                     "created_at": "2026-09-21T00:00:00Z",
                 },
@@ -183,7 +183,7 @@ def main():
 
         print("6b) copilot 账号缺 access_token，应返回明确的「需要重新授权」")
         st, body = http("POST", base + "/v1/chat/completions",
-                        {"model": "copilot-chat", "messages": [{"role": "user", "content": "hi"}]})
+                        {"model": "gpt-5.5", "messages": [{"role": "user", "content": "hi"}]})
         check("缺凭据返回 502", st == 502, "%s" % st)
         check("错误类型为 upstream_auth",
               body.get("error", {}).get("type") == "upstream_auth", str(body))
