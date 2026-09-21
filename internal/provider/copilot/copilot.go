@@ -13,6 +13,7 @@ package copilot
 
 import (
 	"context"
+	"net/http"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,9 @@ type Provider struct {
 	pool   *pool.Pool
 	client *chathub.Client
 	login  *Login
+	// imageClient 专用于下载生成的图片。与 API 客户端的超时策略不同，
+	// 且图片走的是 CDN，连接池分开更稳。
+	imageClient *http.Client
 }
 
 // New 构造 Copilot 上游。
@@ -48,6 +52,7 @@ func New(store *config.Store) *Provider {
 		login:  NewLogin(),
 	}
 	p.pool.Sync(store)
+	p.imageClient = &http.Client{Timeout: 60 * time.Second}
 	return p
 }
 

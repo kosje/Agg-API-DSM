@@ -1,5 +1,5 @@
 package="agg-api-dsm"
-version="0.6.0-0001"
+version="0.8.0-0001"
 os_min_ver="7.0-40000"
 # x86_64 而非 noarch：包里只有一个 linux/amd64 二进制。声明 noarch 会让
 # 套件中心在 ARM 机型（DS223 等）上也提供安装，装完二进制 exec 失败、

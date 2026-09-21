@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -85,6 +86,13 @@ type Handler struct {
 	authorize func(http.ResponseWriter, *http.Request) bool
 	// maxRetries 是单次请求最多换几个账号重试。
 	maxRetries int
+	// chatTimeout / imageTimeout 是上游请求的超时。
+	chatTimeout  time.Duration
+	imageTimeout time.Duration
+	// imageClient 专用于下载上游生成的图片。
+	imageClient *http.Client
+	// images 是生成图片的短期缓存，供客户端按 URL 取回。
+	images *imageStore
 }
 
 // NewHandler 构造入口。authorize 传 nil 表示不校验（仅供本机调试）。
@@ -92,7 +100,14 @@ func NewHandler(r *Router, authorize func(http.ResponseWriter, *http.Request) bo
 	if authorize == nil {
 		authorize = func(http.ResponseWriter, *http.Request) bool { return true }
 	}
-	return &Handler{router: r, authorize: authorize, maxRetries: 2}
+	return &Handler{
+		router: r, authorize: authorize, maxRetries: 2,
+		chatTimeout: 120 * time.Second, imageTimeout: 300 * time.Second,
+		// 下载图片单独一个 client：它走的是上游的 CDN，
+		// 与 API 请求的超时/连接池策略不同，混用会互相干扰。
+		imageClient: &http.Client{Timeout: 60 * time.Second},
+		images:      newImageStore(),
+	}
 }
 
 // SetMaxRetries 调整重试次数（来自 settings.max_retries）。
@@ -101,6 +116,41 @@ func (h *Handler) SetMaxRetries(n int) {
 		n = 0
 	}
 	h.maxRetries = n
+}
+
+// SetTimeouts 调整上游请求超时（来自 settings）。
+//
+// 传 0 表示用默认值 —— 配置里没写时不该变成「永不超时」，
+// 那正是这次 15 分钟挂死的成因。
+func (h *Handler) SetTimeouts(chatSec, imageSec int) {
+	if chatSec > 0 {
+		h.chatTimeout = time.Duration(chatSec) * time.Second
+	}
+	if imageSec > 0 {
+		h.imageTimeout = time.Duration(imageSec) * time.Second
+	}
+}
+
+// readJSON 解析请求体，限制大小。
+func readJSON[T any](r *http.Request) (T, error) {
+	var v T
+	defer r.Body.Close()
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 8<<20))
+	if err := dec.Decode(&v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return v, nil
+		}
+		return v, fmt.Errorf("请求体不是合法 JSON：%w", err)
+	}
+	return v, nil
+}
+
+// timeoutFor 按模型能力挑超时。
+func (h *Handler) timeoutFor(m provider.Model) time.Duration {
+	if m.Caps.Has(provider.CapImage) && !m.Caps.Has(provider.CapText) {
+		return h.imageTimeout
+	}
+	return h.chatTimeout
 }
 
 // retriable 判断一个错误是否值得换个账号重试。
@@ -135,6 +185,8 @@ func backoff(attempt int) time.Duration {
 // Register 把端点挂到 mux 上。
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", h.handleChat)
+	mux.HandleFunc("/v1/images/generations", h.handleImages)
+	mux.HandleFunc("/v1/images/files/", h.handleImageFile)
 	mux.HandleFunc("/v1/models", h.handleModels)
 }
 
@@ -251,8 +303,14 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	attachDocs(preq, docText)
 	preq.Stream = req.Stream
 
+	// 给上游请求加超时。这一步是整个「15 分钟挂死」的解法：
+	// 没有它，上游不响应时请求会一直挂着，直到反代放弃 ——
+	// 用户看到的是反代的 504，网关自己毫不知情。
+	ctx, cancel := context.WithTimeout(r.Context(), h.timeoutFor(model))
+	defer cancel()
+
 	if req.Stream {
-		h.streamChat(w, r, up, model.Upstream, req.Model, preq, sessionKey(r, preq))
+		h.streamChat(ctx, w, up, model.Upstream, req.Model, preq, sessionKey(r, preq))
 		return
 	}
 
@@ -262,7 +320,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		tried   []string
 	)
 	for attempt := 0; attempt <= h.maxRetries; attempt++ {
-		lease, aerr := up.Acquire(r.Context(), sessionKey(r, preq), tried...)
+		lease, aerr := up.Acquire(ctx, sessionKey(r, preq), tried...)
 		if aerr != nil {
 			// 池里已经没别的账号可用了：把最后一次的上游错误报出去，
 			// 那比「没有可用账号」更能说明问题。
@@ -273,7 +331,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		preq.Credential = lease.Credential()
-		resp, lastErr = up.Chat(r.Context(), preq)
+		resp, lastErr = up.Chat(ctx, preq)
 		lease.Release(lastErr)
 		if lastErr == nil {
 			break
@@ -292,7 +350,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(toOpenAIResponse(req.Model, resp))
+	_ = json.NewEncoder(w).Encode(h.toOpenAIResponse(r, up, preq.Credential, req.Model, resp))
 }
 
 // sessionKey 给账号池的软粘性用：同一会话尽量复用上次成功的账号。
@@ -381,7 +439,32 @@ func flattenContent(v any) string {
 }
 
 // toOpenAIResponse 把归一化响应转回 OpenAI 形状。
-func toOpenAIResponse(model string, resp *provider.ChatResponse) map[string]any {
+// toOpenAIResponse 把归一化响应转成 OpenAI 格式。
+//
+// 需要 h / r / up / cred 是为了**中转图片**：上游返回的图片地址需要令牌
+// 鉴权，直接塞给客户端它取不到。这里由网关取回，**内联成 data URL**。
+//
+// 为什么不返回一个网关地址让客户端自己去下：那要多一次往返，
+// 而且依赖客户端能访问到网关的对外地址（反代、端口、网络策略任一环节
+// 出问题图就显示不出来）。内联进响应则一次到位 —— 客户端拿到就能渲染。
+func (h *Handler) toOpenAIResponse(r *http.Request, up provider.Provider,
+	cred any, model string, resp *provider.ChatResponse) map[string]any {
+	// 用 markdown 图片语法而不是自定义字段：客户端普遍会渲染 content 里的
+	// markdown，而自定义字段没人认。
+	content := resp.Content
+	for _, u := range resp.Images {
+		if u == "" {
+			continue
+		}
+		raw, mime, err := h.fetchUpstreamImage(r.Context(), up, cred, u)
+		if err != nil {
+			// 取图失败不该让整个回复失败 —— 文字部分还是有价值的。
+			// 把原因写出来，用户至少知道图为什么没出来。
+			content += "\n\n（图片已生成但取回失败：" + err.Error() + "）"
+			continue
+		}
+		content += "\n\n![](" + dataURL(raw, mime) + ")"
+	}
 	return map[string]any{
 		"id":     "chatcmpl-agg",
 		"object": "chat.completion",
@@ -391,7 +474,7 @@ func toOpenAIResponse(model string, resp *provider.ChatResponse) map[string]any 
 			"finish_reason": "stop",
 			"message": map[string]any{
 				"role":    "assistant",
-				"content": resp.Content,
+				"content": content,
 			},
 		}},
 		"usage": map[string]any{

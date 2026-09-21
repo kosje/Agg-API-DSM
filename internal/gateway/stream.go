@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,12 +85,11 @@ func chunkToOpenAI(model, id string, first bool, delta provider.StreamChunk) map
 //   - 拿不到第一个分片之前就失败 → 还能正常返回 JSON 错误
 //   - 已经开始流式之后失败 → 发一条 error 事件，再补 [DONE] 收尾，
 //     否则客户端会一直等一个永远不来的结束标记
-func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request,
+func (h *Handler) streamChat(ctx context.Context, w http.ResponseWriter,
 	up provider.Provider, model, publicModel string, req *provider.ChatRequest,
 	sessionKey string) {
 
 	ch := make(chan provider.StreamChunk, 8)
-	ctx := r.Context()
 
 	// 领账号 + 取第一个分片，失败就换账号重试。
 	//

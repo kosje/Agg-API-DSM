@@ -128,3 +128,60 @@ func (r *Router) Supports(model string, want provider.Capability) bool {
 	}
 	return false
 }
+
+// PickImageModel 挑一个声明了生图能力的模型。
+//
+// 传空 model 时自动挑一个（优先 copilot-auto，它是上游的智能路由）；
+// 传了名字就精确匹配，并要求它确实声明了生图能力 ——
+// 用纯文本模型生图只会拿到一段「我不能画图」的文字回复。
+func (r *Router) PickImageModel(name string) (provider.Model, provider.Provider, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	find := func(id string) (provider.Model, bool) {
+		for _, m := range r.models {
+			if m.ID == id {
+				return m, true
+			}
+		}
+		return provider.Model{}, false
+	}
+	resolve := func(m provider.Model) (provider.Model, provider.Provider, error) {
+		up, ok := r.byModel[m.ID]
+		if !ok {
+			return provider.Model{}, nil, fmt.Errorf("%w：模型 %s 没有归属的上游",
+				provider.ErrUnsupported, m.ID)
+		}
+		return m, up, nil
+	}
+
+	if name != "" {
+		m, ok := find(name)
+		if !ok {
+			return provider.Model{}, nil, fmt.Errorf("%w：没有模型 %s", provider.ErrUnsupported, name)
+		}
+		if !m.Caps.Has(provider.CapImage) {
+			return provider.Model{}, nil, fmt.Errorf(
+				"%w：模型 %s 不支持生图，请用 gpt-image-2 或 copilot-auto",
+				provider.ErrUnsupported, name)
+		}
+		return resolve(m)
+	}
+
+	// 没指定：优先 copilot-auto（上游智能路由，会自己决定画不画）
+	if m, ok := find("copilot-auto"); ok && m.Caps.Has(provider.CapImage) {
+		return resolve(m)
+	}
+	// 其次找「纯生图」模型（只有 CapImage、不带 CapText）
+	for _, m := range r.models {
+		if m.Caps.Has(provider.CapImage) && !m.Caps.Has(provider.CapText) {
+			return resolve(m)
+		}
+	}
+	for _, m := range r.models {
+		if m.Caps.Has(provider.CapImage) {
+			return resolve(m)
+		}
+	}
+	return provider.Model{}, nil, fmt.Errorf("%w：没有可用的生图模型", provider.ErrUnsupported)
+}

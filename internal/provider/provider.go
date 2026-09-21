@@ -245,6 +245,17 @@ type AccountStat struct {
 	LastUsedAt  string `json:"last_used_at,omitempty"`
 }
 
+// ImageFetcher 是能带凭据下载自己生成的图片的上游。
+//
+// 为什么不让网关直接下：上游的图片 URL 需要该账号的令牌鉴权，
+// 而令牌只有 provider 知道怎么用。把这层留在 provider 里，
+// 网关就不必理解任何上游的鉴权细节。
+type ImageFetcher interface {
+	Provider
+	// FetchImage 带凭据把图片下下来，返回内容与 MIME。
+	FetchImage(ctx context.Context, credential any, rawURL string) (data []byte, mime string, err error)
+}
+
 // ModelSourceReporter 是能说明「模型清单从哪来」的上游。
 //
 // 为什么要暴露这个：控制台显示 agnes-auto 这种占位名时，用户会以为配错了，

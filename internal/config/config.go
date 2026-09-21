@@ -59,6 +59,16 @@ type Settings struct {
 	MaxRetries int `json:"max_retries"`
 	// BackoffBaseMS 是换账号重试的退避基数（毫秒）。
 	BackoffBaseMS int `json:"backoff_base_ms"`
+	// ChatTimeoutSec 是单次对话请求的超时（秒）。
+	//
+	// 必须有这个上限。没有它，上游一旦不响应，请求会一直挂着 ——
+	// 用户看到的是「转了十几分钟然后 504」，而那个 504 还是反代给的，
+	// 网关自己毫无察觉。有超时才能快速失败、换账号重试。
+	ChatTimeoutSec int `json:"chat_timeout_sec"`
+	// ImageTimeoutSec 是单次生图请求的超时（秒）。
+	//
+	// 比对话长得多：生图本来就慢，上游要渲染、审核、上传。
+	ImageTimeoutSec int `json:"image_timeout_sec"`
 }
 
 // DefaultSettings 是首次运行时的设置。
@@ -66,7 +76,13 @@ type Settings struct {
 // DefaultRPM 取 10：上游 Agnes 官方限流较紧，宁可保守。
 // 用户可在控制台按账号覆盖。
 func DefaultSettings() Settings {
-	return Settings{DefaultRPM: 10, MaxRetries: 3, BackoffBaseMS: 400}
+	return Settings{
+		DefaultRPM: 10, MaxRetries: 3, BackoffBaseMS: 400,
+		// 对话 120 秒：普通对话远超不了这个数，超过就说明卡住了。
+		ChatTimeoutSec: 120,
+		// 生图 300 秒：上游渲染 + 审核 + 上传，给足时间。
+		ImageTimeoutSec: 300,
+	}
 }
 
 // Store 是配置的读写入口。所有方法可并发调用。
