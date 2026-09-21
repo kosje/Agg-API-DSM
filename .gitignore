@@ -13,3 +13,4 @@
 # 测试与临时产物
 __pycache__/
 *.log
+/.e2e-data/

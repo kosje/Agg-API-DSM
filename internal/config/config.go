@@ -74,7 +74,10 @@ type Store struct {
 	mu       sync.RWMutex
 	path     string
 	Accounts []Account `json:"accounts"`
-	Settings Settings  `json:"settings"`
+	// APIKeys 是下游密钥（只存散列）。字段名不用 Keys，
+	// 因为 Keys() 是它的读方法，同名会造成混淆。
+	APIKeys  []Key    `json:"keys,omitempty"`
+	Settings Settings `json:"settings"`
 }
 
 // ErrNotFound 表示目标不存在。

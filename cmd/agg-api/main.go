@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,17 +82,51 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+
+	// 下游密钥校验。
+	//
+	// 一条密钥都没配时放行本机访问（方便首次部署后立刻能打开控制台），
+	// 一旦配了就必须带密钥 —— 否则用户配了密钥却发现根本没生效，
+	// 那种「以为已经锁上其实没锁」的状态比完全开放更危险。
+	authorize := func(w http.ResponseWriter, r *http.Request) bool {
+		if !store.HasKeys() {
+			if isLoopback(r.RemoteAddr) {
+				return true
+			}
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
+				"message": "尚未配置任何下游 API Key，且请求来自非本机地址。" +
+					"请先在控制台创建密钥。",
+				"type": "no_key_configured",
+			}})
+			return false
+		}
+		token := bearer(r)
+		if token == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
+				"message": "缺少 Authorization: Bearer <key>",
+				"type":    "invalid_api_key",
+			}})
+			return false
+		}
+		id, ok := store.VerifyKey(token)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
+				"message": "API Key 无效或已停用",
+				"type":    "invalid_api_key",
+			}})
+			return false
+		}
+		store.TouchKey(id)
+		return true
+	}
+
+	gateway.NewHandler(router, authorize).Register(mux)
+
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":    "ok",
 			"version":   version,
 			"upstreams": upstreamHealth(router),
-		})
-	})
-	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"object": "list",
-			"data":   modelList(router),
 		})
 	})
 
@@ -132,34 +167,34 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+// bearer 从 Authorization 头取出 Bearer 令牌。
+func bearer(r *http.Request) string {
+	v := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
+		return strings.TrimSpace(v[7:])
+	}
+	return ""
+}
+
+// isLoopback 判断请求是否来自本机。
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// modelList 把各上游的模型汇总成 OpenAI 的 /v1/models 形状。
-// owned_by 填上游名，客户端据此就能看出某个模型实际走哪条链路。
-func modelList(r *gateway.Router) []map[string]any {
-	owner := map[string]string{}
-	for _, p := range r.Providers() {
-		for _, m := range p.Models() {
-			owner[m.ID] = p.Name()
-		}
-	}
-	models := r.Models()
-	out := make([]map[string]any, 0, len(models))
-	for _, m := range models {
-		out = append(out, map[string]any{
-			"id":       m.ID,
-			"object":   "model",
-			"owned_by": owner[m.ID],
-			"created":  0,
-		})
-	}
-	return out
-}
-
+// upstreamHealth 汇总各上游的健康状况。
+// 注意：/v1/models 不在这里实现 —— 它属于网关的 OpenAI 兼容端点，
+// 与路由、鉴权放在一起，见 internal/gateway/openai.go。
 func upstreamHealth(r *gateway.Router) map[string]any {
 	out := map[string]any{}
 	for _, p := range r.Providers() {
