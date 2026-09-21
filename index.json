@@ -2,12 +2,12 @@
   "packages": [
     {
       "package": "agg-api-dsm",
-      "version": "0.2.0-0001",
+      "version": "0.3.0-0001",
       "dname": "Agg-API-DSM",
       "desc": "Agg-API-DSM 本地网关（群晖 DSM 版）。一个套件同时提供两个上游：Agnes AI 与 M365 Copilot。下游只认一个地址、一个 API Key，由模型名决定走哪条链路（agnes-* / copilot-*）。两个上游共用同一套账号池与 RPM 限流节拍：账号轮换、失败冷却、按负载选账号都是共享的。自带 Web 管理控制台：上游状态、账号管理（Copilot 走浏览器授权，无需设备码）、下游 API Key 管理。服务端口 4444，安装向导可设置管理员口令。升级请在套件中心安装新版 SPK。",
-      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.2.0/agg-api-dsm-0.2.0.spk",
-      "md5": "f94f5de60d325720d7a79ff4c9418a29",
-      "size": 2846720,
+      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.3.0/agg-api-dsm-0.3.0.spk",
+      "md5": "5b9e18decfa3a7a4ae23b637dd17f2e5",
+      "size": 4116480,
       "thumbnail": [
         "https://kosje.github.io/Agg-API-DSM/icon_72.png"
       ],
@@ -22,7 +22,7 @@
       "maintainer_url": "https://github.com/kosje/Agg-API-DSM",
       "distributor": "kosje",
       "distributor_url": "https://github.com/kosje/Agg-API-DSM",
-      "changelog": "修复 Copilot 请求缺必填字段（Scenario/LicenseType/Tone），oid/tid 增加从令牌解析的兜底；新增 /api/diag 诊断端点。"
+      "changelog": "流式输出接通（两个上游）；附件解析支持 PDF/XLSX/CSV/TSV；控制台新增账号池可视化；修一个导致附件文本被丢弃的 bug。"
     }
   ]
 }
