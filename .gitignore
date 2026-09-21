@@ -1,0 +1,15 @@
+# 编译产物
+/dist/
+/agg-api
+/agg-api.exe
+*.exe~
+
+# 运行期数据：含上游 API Key 与管理员口令散列，绝不提交
+/data/
+
+# SPK 构建暂存目录（由 spk/build-spk.sh 生成）
+/.spkbuild/
+
+# 测试与临时产物
+__pycache__/
+*.log
