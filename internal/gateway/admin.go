@@ -277,6 +277,9 @@ func (a *Admin) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errObj(err.Error()))
 			return
 		}
+		// 必须同步池子，否则新账号不会参与调度 ——
+		// 用户看到「账号列表里有、但池子里没有」，只能靠重启服务解决。
+		a.syncProviders()
 		writeJSON(w, http.StatusOK, map[string]any{"account": saved})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errObj("只支持 GET / POST"))
@@ -296,6 +299,9 @@ func (a *Admin) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errObj(err.Error()))
 		return
 	}
+	// 删了也要同步：不同步的话池子里还留着这个账号，
+	// 请求会继续打到它，而且用户完全看不出为什么。
+	a.syncProviders()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -497,6 +503,20 @@ func (a *Admin) handleRevive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNotFound, errObj("没有这个上游："+provName))
+}
+
+// syncProviders 让所有上游按最新配置重建账号池。
+//
+// 每次账号增删改后都要调用。之前只在 Copilot 的授权流程里调了 Sync，
+// 手动添加账号的路径没调 —— 结果是 Copilot（走授权）显示 2/2 正常，
+// 而手动加的 Agnes 账号不进池，控制台只显示 1 个。
+//
+// 全部同步而不是只同步受影响的那个：账号可能被改了 provider 归属，
+// 逐个判断反而容易漏。
+func (a *Admin) syncProviders() {
+	for _, p := range a.router.Providers() {
+		p.Sync()
+	}
 }
 
 // ---------- 小工具 ----------

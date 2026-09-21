@@ -22,8 +22,34 @@ import (
 	"aggapi/internal/provider"
 )
 
-// DefaultBaseURL 是账号未填 base_url 时的上游站点。
-const DefaultBaseURL = "https://api.agnes.ai"
+// Agnes 的两个官方站点。
+//
+// 注意域名是 **agnes-ai.com** / **agnes-ai.cn**，不是 agnes.ai ——
+// 后者根本不存在（写错的话所有请求都会 DNS 解析失败，
+// 而错误信息里只看到「no such host」，不容易联想到是默认值写错了）。
+const (
+	// DefaultBaseURL 是账号未填 base_url 时用的国际站。
+	DefaultBaseURL = "https://apihub.agnes-ai.com/v1"
+	// CNBaseURL 是中国站。两个站点账号互通，但凭据被拒的情况可能只在一侧。
+	CNBaseURL = "https://api.agnes-ai.cn/v1"
+)
+
+// IsCNHost 判断这个 base_url 是不是中国站。
+func IsCNHost(baseURL string) bool {
+	return strings.Contains(strings.ToLower(baseURL), "agnes-ai.cn")
+}
+
+// altSiteFor 返回「同一账号的另一个站点」地址。
+//
+// 用途：某个站点返回 401/403 时，换另一站点重试同一账号。
+// 两个站点凭据互通，被拒常常是单侧的风控或路由问题，
+// 换一边往往就好了 —— 这是 agnes 原项目 RegionPriority 的语义。
+func altSiteFor(baseURL string) string {
+	if IsCNHost(baseURL) {
+		return DefaultBaseURL
+	}
+	return CNBaseURL
+}
 
 // userAgent 固定标识自己。
 //

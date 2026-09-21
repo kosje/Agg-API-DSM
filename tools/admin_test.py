@@ -140,6 +140,52 @@ def main():
         check("同 state 二次提交被拒",
               "授权会话不存在" in body.get("error", ""), body.get("error", ""))
 
+        print("10b) 加账号后要立刻进池（不需要重启）")
+        st, body, _ = http("GET", "/api/state", cookie=cookie)
+        before = len(body.get("accounts") or [])
+        # 加一个 agnes 账号 —— 这条路径之前漏了 Sync，
+        # 表现为「账号列表里有、池子里没有」。
+        st, body, _ = http("POST", "/api/accounts", {
+            "provider": "agnes", "name": "测试账号A",
+            "base_url": "https://apihub.agnes-ai.com/v1",
+            "api_key": "sk-test-a", "models": ["agnes-2.5-flash"], "enabled": True,
+        }, cookie)
+        check("添加账号成功", st == 200, "%s %s" % (st, str(body)[:120]))
+        st, body, _ = http("POST", "/api/accounts", {
+            "provider": "agnes", "name": "测试账号B",
+            "base_url": "https://apihub.agnes-ai.com/v1",
+            "api_key": "sk-test-b", "models": ["agnes-2.5-flash"], "enabled": True,
+        }, cookie)
+        check("第二个账号也加成功", st == 200, "%s" % st)
+
+        st, body, _ = http("GET", "/api/state", cookie=cookie)
+        agnes = None
+        for prov in body.get("providers") or []:
+            if prov.get("name") == "agnes":
+                agnes = prov
+        check("上游列表里有 agnes", agnes is not None, str(body.get("providers"))[:120])
+        if agnes:
+            pool = agnes.get("accounts") or []
+            check("两个账号都进了池", len(pool) == 2, "池里 %d 个" % len(pool))
+            check("健康计数是 2/2", "2/2" in (agnes.get("detail") or ""), agnes.get("detail", ""))
+            names = sorted(a.get("name") for a in pool)
+            check("池里就是这两个账号", names == ["测试账号A", "测试账号B"], str(names))
+
+        print("10c) 删除账号后要立刻出池")
+        st, body, _ = http("GET", "/api/state", cookie=cookie)
+        victim = None
+        for a in body.get("accounts") or []:
+            if a.get("name") == "测试账号A":
+                victim = a.get("id")
+        check("找到待删账号", victim is not None, "")
+        if victim:
+            http("POST", "/api/accounts/delete?id=" + victim, cookie=cookie)
+            st, body, _ = http("GET", "/api/state", cookie=cookie)
+            for prov in body.get("providers") or []:
+                if prov.get("name") == "agnes":
+                    pool = prov.get("accounts") or []
+                    check("删后池里只剩 1 个", len(pool) == 1, "池里 %d 个" % len(pool))
+
         print("11) 回调地址解析（三种粘贴形式 + 两种无效输入）")
         # 判据：能解析出来的，错误会是「换取令牌失败」（说明已经过了解析、真的去换令牌了）；
         # 解析不出来的，错误会是解析阶段的提示。用这个区分，比匹配具体文案可靠。
