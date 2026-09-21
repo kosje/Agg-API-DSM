@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"aggapi/internal/config"
 	"aggapi/internal/gateway"
 	"aggapi/internal/provider"
 	"aggapi/internal/provider/agnes"
@@ -62,12 +63,17 @@ func main() {
 		log.Fatalf("创建数据目录失败：%v", err)
 	}
 
+	store, err := config.NewStore(*dataDir)
+	if err != nil {
+		log.Fatalf("初始化数据目录失败：%v", err)
+	}
+
 	router := gateway.NewRouter()
 
 	// 装配上游。新增上游只需在这里加一行 —— 网关核心不需要任何改动。
 	for _, p := range []provider.Provider{
-		agnes.New(*dataDir),
-		copilot.New(*dataDir),
+		agnes.New(store),
+		copilot.New(store),
 	} {
 		if err := router.Register(p); err != nil {
 			log.Fatalf("注册上游失败：%v", err)
@@ -77,8 +83,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status": "ok",
-			"version": version,
+			"status":    "ok",
+			"version":   version,
 			"upstreams": upstreamHealth(router),
 		})
 	})

@@ -14,16 +14,21 @@ import (
 	"context"
 	"fmt"
 
+	"aggapi/internal/config"
 	"aggapi/internal/provider"
 )
 
 // Provider 实现 provider.Provider。
 type Provider struct {
-	dataDir string
+	store *config.Store
 }
 
-func New(dataDir string) *Provider {
-	return &Provider{dataDir: dataDir}
+// New 构造 Copilot 上游。
+//
+// store 目前只用于将来读取账号；参数先保持一致，
+// 免得接通时还要改装配处的调用签名。
+func New(store *config.Store) *Provider {
+	return &Provider{store: store}
 }
 
 func (p *Provider) Name() string        { return "copilot" }
