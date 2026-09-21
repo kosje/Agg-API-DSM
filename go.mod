@@ -9,3 +9,5 @@ go 1.22
 //   github.com/xuri/excelize    -> 同上，仅 1 处
 //   github.com/tiktoken-go      -> 仅 1 处（codex_usage.go 的 token 估算），改用字符数近似
 //   golang.org/x/net/proxy      -> 仅 1 处（outbound/proxy.go 的 SOCKS），首版只支持 HTTP 代理
+
+require github.com/gorilla/websocket v1.5.3
