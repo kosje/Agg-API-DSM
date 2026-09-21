@@ -28,6 +28,7 @@ import (
 	"aggapi/internal/provider"
 	"aggapi/internal/provider/agnes"
 	"aggapi/internal/provider/copilot"
+	"aggapi/internal/web"
 )
 
 // 版本号单一来源：发版脚本读这一行。
@@ -121,6 +122,10 @@ func main() {
 	}
 
 	gateway.NewHandler(router, authorize).Register(mux)
+
+	// 管理 API 与控制台。
+	gateway.NewAdmin(store, router).Register(mux)
+	mux.HandleFunc("/", web.Console())
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{

@@ -184,6 +184,35 @@ type Provider interface {
 	ChatStream(ctx context.Context, req *ChatRequest, ch chan<- StreamChunk)
 }
 
+// AuthStart 是一次交互式授权的发起结果，交给控制台展示。
+type AuthStart struct {
+	// AuthURL 让用户在浏览器里打开。
+	AuthURL string `json:"auth_url"`
+	// State 是本次会话标识，提交回调地址时要带回来。
+	State string `json:"state"`
+	// RedirectURI 一并回显：用户需要知道「跳到哪个地址才算成功」，
+	// 否则看到空白页会以为出错了。
+	RedirectURI string `json:"redirect_uri"`
+	// Hint 是给用户看的一句话操作说明。
+	Hint string `json:"hint"`
+	// ExpiresIn 是本次会话剩余有效期（秒）。
+	ExpiresIn int `json:"expires_in"`
+}
+
+// AuthProvider 是支持「交互式授权加账号」的上游。
+//
+// 用独立的可选接口而不是塞进 Provider：只有需要 OAuth 的上游才实现它，
+// 网关用类型断言探测。这样 Agnes 那种「填 API Key 就行」的上游
+// 不必实现一堆空方法，网关也不必认识任何具体上游。
+type AuthProvider interface {
+	Provider
+	// AuthStart 发起一次授权，返回给用户打开的链接。
+	AuthStart() (AuthStart, error)
+	// AuthFinish 用用户粘贴的回调地址换取凭据并落库，
+	// 返回新账号的 ID 与显示名。
+	AuthFinish(state, pasted, displayName string) (id, name string, err error)
+}
+
 // 网关层的通用错误。上游实现应当用这些包装，便于网关统一映射成 HTTP 状态码。
 var (
 	// ErrNoCapacity 表示上游暂时没有可用账号（全部熔断 / 未配置）。

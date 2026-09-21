@@ -71,13 +71,17 @@ func DefaultSettings() Settings {
 
 // Store 是配置的读写入口。所有方法可并发调用。
 type Store struct {
-	mu       sync.RWMutex
-	path     string
-	Accounts []Account `json:"accounts"`
+	mu   sync.RWMutex
+	path string
+	// AccountList 是账号集合。字段名不叫 Accounts，因为 Accounts() 是它的读方法。
+	AccountList []Account `json:"accounts"`
 	// APIKeys 是下游密钥（只存散列）。字段名不用 Keys，
 	// 因为 Keys() 是它的读方法，同名会造成混淆。
 	APIKeys  []Key    `json:"keys,omitempty"`
 	Settings Settings `json:"settings"`
+	// Admin 是管理端口令的散列。为 nil 表示尚未设置 ——
+	// 首次部署时控制台会引导设置，设置前只允许本机访问。
+	Admin *AdminAuth `json:"admin,omitempty"`
 }
 
 // ErrNotFound 表示目标不存在。
@@ -122,6 +126,19 @@ func NewStore(dataDir string) (*Store, error) {
 // Path 返回配置文件路径，供控制台显示。
 func (s *Store) Path() string { return s.path }
 
+// Accounts 返回全部账号（含停用的），按 ID 稳定排序。
+//
+// 与 AccountsFor 的区别：那个只给调度用（只取启用的），
+// 这个给控制台用 —— 用户需要看到自己停用了哪些账号。
+func (s *Store) Accounts() []Account {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Account, len(s.AccountList))
+	copy(out, s.AccountList)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
 // AccountsFor 返回某个上游下所有启用的账号，顺序稳定。
 //
 // 稳定排序很重要：账号池的粘性与轮询都建立在「同一份配置每次得到同样的顺序」
@@ -129,8 +146,8 @@ func (s *Store) Path() string { return s.path }
 func (s *Store) AccountsFor(providerName string) []Account {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]Account, 0, len(s.Accounts))
-	for _, a := range s.Accounts {
+	out := make([]Account, 0, len(s.AccountList))
+	for _, a := range s.AccountList {
 		if a.Provider == providerName && a.Enabled {
 			out = append(out, a)
 		}
@@ -169,15 +186,15 @@ func (s *Store) UpsertAccount(a Account) (Account, error) {
 		return Account{}, errors.New("账号缺少 provider")
 	}
 	replaced := false
-	for i := range s.Accounts {
-		if s.Accounts[i].ID == a.ID {
-			s.Accounts[i] = a
+	for i := range s.AccountList {
+		if s.AccountList[i].ID == a.ID {
+			s.AccountList[i] = a
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		s.Accounts = append(s.Accounts, a)
+		s.AccountList = append(s.AccountList, a)
 	}
 	s.mu.Unlock()
 	if err := s.save(); err != nil {
@@ -190,8 +207,8 @@ func (s *Store) UpsertAccount(a Account) (Account, error) {
 func (s *Store) DeleteAccount(id string) error {
 	s.mu.Lock()
 	idx := -1
-	for i := range s.Accounts {
-		if s.Accounts[i].ID == id {
+	for i := range s.AccountList {
+		if s.AccountList[i].ID == id {
 			idx = i
 			break
 		}
@@ -200,7 +217,7 @@ func (s *Store) DeleteAccount(id string) error {
 		s.mu.Unlock()
 		return ErrNotFound
 	}
-	s.Accounts = append(s.Accounts[:idx], s.Accounts[idx+1:]...)
+	s.AccountList = append(s.AccountList[:idx], s.AccountList[idx+1:]...)
 	s.mu.Unlock()
 	return s.save()
 }

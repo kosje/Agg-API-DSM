@@ -15,11 +15,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"aggapi/internal/config"
 	"aggapi/internal/pool"
 	"aggapi/internal/provider"
+	"aggapi/internal/provider/copilot/auth"
 	"aggapi/internal/provider/copilot/chathub"
 )
 
@@ -28,17 +31,106 @@ type Provider struct {
 	store  *config.Store
 	pool   *pool.Pool
 	client *chathub.Client
+	login  *Login
 }
 
 // New 构造 Copilot 上游。
+//
+// 账号池与 Agnes 那边是同一个实现（internal/pool）—— 这正是本项目
+// 「互补而非重叠」的落点：Copilot 也有配额、也会 429、也需要冷却轮换。
 func New(store *config.Store) *Provider {
 	p := &Provider{
 		store:  store,
 		pool:   pool.New("copilot"),
 		client: chathub.NewClient(),
+		login:  NewLogin(),
 	}
 	p.pool.Sync(store)
 	return p
+}
+
+// Login 暴露授权流程给控制台。
+func (p *Provider) Login() *Login { return p.login }
+
+// AuthStart 发起一次授权。
+func (p *Provider) AuthStart() (provider.AuthStart, error) {
+	r, err := p.login.Start()
+	if err != nil {
+		return provider.AuthStart{}, err
+	}
+	return provider.AuthStart{
+		AuthURL:     r.AuthURL,
+		State:       r.State,
+		RedirectURI: r.RedirectURI,
+		Hint:        r.Hint,
+		ExpiresIn:   r.ExpiresIn,
+	}, nil
+}
+
+// AuthFinish 用回调地址换取凭据、落库，并让账号池立刻认得这个新账号。
+//
+// 必须调 Sync：否则用户加完账号要重启服务才能用上，
+// 那种「明明加成功了却还是说没有账号」的体验很糟。
+func (p *Provider) AuthFinish(state, pasted, displayName string) (string, string, error) {
+	acct, err := p.login.Finish(state, pasted, displayName)
+	if err != nil {
+		return "", "", err
+	}
+	saved, err := p.store.UpsertAccount(acct)
+	if err != nil {
+		return "", "", fmt.Errorf("保存账号失败：%w", err)
+	}
+	p.Sync()
+	return saved.ID, saved.Name, nil
+}
+
+// refreshSkew 是提前刷新的余量。
+//
+// 留 5 分钟而不是卡着过期时间刷：一次对话可能跑很久（生图尤其慢），
+// 令牌在请求途中过期会让整次调用白费。
+const refreshSkew = 5 * time.Minute
+
+// ensureFresh 在令牌临近过期时先刷新，并把新令牌写回配置。
+//
+// 刷新失败不直接报错，而是让请求继续用旧令牌试一次 ——
+// 上游偶尔会在令牌「看似过期」时仍然接受，白白失败一次不划算。
+func (p *Provider) ensureFresh(ctx context.Context, acct config.Account) config.Account {
+	exp, err := time.Parse(time.RFC3339, acct.Auth["expires_at"])
+	if err != nil {
+		return acct // 没有过期信息：不动它，让上游自己判断
+	}
+	if time.Until(exp) > refreshSkew {
+		return acct
+	}
+
+	rt := strings.TrimSpace(acct.Auth["refresh_token"])
+	if rt == "" {
+		return acct
+	}
+
+	ts, err := auth.Refresh(rt, "", "", acct.Auth["oid"], acct.Auth["tid"])
+	if err != nil {
+		log.Printf("[copilot] 账号 %s 刷新令牌失败，沿用旧令牌：%v", acct.Name, err)
+		return acct
+	}
+
+	acct.Auth["access_token"] = ts.AccessToken
+	if ts.RefreshToken != "" {
+		// 微软会轮换 refresh_token，不保存新的下次就刷不动了。
+		acct.Auth["refresh_token"] = ts.RefreshToken
+	}
+	if ts.HomeOID != "" {
+		acct.Auth["oid"] = ts.HomeOID
+	}
+	if ts.TenantID != "" {
+		acct.Auth["tid"] = ts.TenantID
+	}
+	acct.Auth["expires_at"] = ts.ExpiresAt.Format(time.RFC3339)
+
+	if _, err := p.store.UpsertAccount(acct); err != nil {
+		log.Printf("[copilot] 账号 %s 新令牌落盘失败：%v", acct.Name, err)
+	}
+	return acct
 }
 
 // Sync 重新读取配置。
@@ -134,6 +226,8 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 	if !ok {
 		return nil, fmt.Errorf("%w：Copilot 未收到账号凭据", provider.ErrNoCapacity)
 	}
+	// 令牌可能已过期：先刷新再建连，避免请求跑到一半被上游断掉。
+	acct = p.ensureFresh(ctx, acct)
 	ca, err := toChatHubAccount(acct)
 	if err != nil {
 		return nil, err

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agg-API-DSM 控制台</title>
+<style>
+  :root { color-scheme: light dark; --line: rgba(128,128,128,.3); --bg2: rgba(128,128,128,.08); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header .sp { flex: 1; }
+  main { max-width: 920px; margin: 0 auto; padding: 20px; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 500; opacity: .7; }
+  input, select, button, textarea { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  input, textarea { width: 100%; }
+  button { cursor: pointer; white-space: nowrap; }
+  button.primary { border-color: #4a7fd9; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .row > label { flex: 0 0 110px; opacity: .75; }
+  .muted { opacity: .6; font-size: 12px; }
+  .ok { color: #2f9e44; } .bad { color: #d9480f; }
+  pre { background: var(--bg2); padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .hide { display: none; }
+  code { background: var(--bg2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agg-API-DSM</h1>
+  <span class="muted" id="ver"></span>
+  <span class="sp"></span>
+  <button id="btnLogout" class="hide">退出</button>
+</header>
+<main>
+  <section id="secSetup" class="hide">
+    <h2>首次设置</h2>
+    <div class="card">
+      <p>还没设置管理端口令。请设置一个至少 12 位的口令 —— 它保护的是整个管理界面。</p>
+      <div class="row"><label>新口令</label><input id="setupPwd" type="password" autocomplete="new-password"></div>
+      <div class="row"><label>再输一次</label><input id="setupPwd2" type="password" autocomplete="new-password"></div>
+      <button class="primary" id="btnSetup">设置</button>
+      <span class="muted" id="setupMsg"></span>
+    </div>
+  </section>
+
+  <section id="secLogin" class="hide">
+    <h2>登录</h2>
+    <div class="card">
+      <div class="row"><label>管理端口令</label><input id="loginPwd" type="password" autocomplete="current-password"></div>
+      <button class="primary" id="btnLogin">登录</button>
+      <span class="muted" id="loginMsg"></span>
+    </div>
+  </section>
+
+  <div id="panel" class="hide">
+    <section>
+      <h2>上游状态</h2>
+      <table><thead><tr><th>上游</th><th>状态</th><th>说明</th><th>模型</th></tr></thead>
+      <tbody id="tbProviders"></tbody></table>
+    </section>
+
+    <section>
+      <h2>账号</h2>
+      <table><thead><tr><th>名称</th><th>上游</th><th>模型</th><th>启用</th><th></th></tr></thead>
+      <tbody id="tbAccounts"></tbody></table>
+
+      <div class="card" style="margin-top:12px">
+        <div id="addManual">
+          <p class="muted">手动添加（Agnes 等用 API Key 的上游）</p>
+          <div class="row"><label>上游</label><input id="accProvider" value="agnes"></div>
+          <div class="row"><label>名称</label><input id="accName" placeholder="随便起个名"></div>
+          <div class="row"><label>Base URL</label><input id="accBase" placeholder="留空用默认"></div>
+          <div class="row"><label>API Key</label><input id="accKey"></div>
+          <div class="row"><label>模型</label><input id="accModels" placeholder="逗号分隔，留空用默认"></div>
+          <div class="row"><label></label><button id="btnAddAcc">添加账号</button><span class="muted" id="accMsg"></span></div>
+        </div>
+
+        <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+        <p class="muted">Copilot 账号（浏览器授权）</p>
+        <p class="muted">
+          微软自 2026-07-01 起对新租户默认阻止设备码流程，所以这里用浏览器 PKCE。
+          点「生成授权链接」→ 在浏览器打开并登录 → 浏览器会跳到一个空白页，
+          <strong>把地址栏里的完整地址复制下来</strong>贴到下面。
+        </p>
+        <div class="row"><label></label><button id="btnAuthStart">生成授权链接</button></div>
+        <div id="authStep2" class="hide">
+          <div class="row"><label>授权链接</label></div>
+          <pre id="authURL"></pre>
+          <div class="row"><label></label>
+            <button id="btnCopyAuth">复制链接</button>
+            <a id="authOpen" target="_blank" rel="noopener"><button>在新窗口打开</button></a>
+          </div>
+          <div class="row"><label>回调地址</label><input id="authCallback" placeholder="粘贴浏览器地址栏里的完整地址"></div>
+          <div class="row"><label>账号名称</label><input id="authName" placeholder="可留空，默认用微软账号名"></div>
+          <div class="row"><label></label><button class="primary" id="btnAuthFinish">完成授权</button>
+            <span class="muted" id="authMsg"></span></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>下游 API Key</h2>
+      <p class="muted">客户端用这个 Key 访问本网关。库里只存散列，明文只在创建时显示一次。</p>
+      <table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最后使用</th><th></th></tr></thead>
+      <tbody id="tbKeys"></tbody></table>
+      <div class="row" style="margin-top:10px">
+        <label></label><input id="keyName" placeholder="给这个 Key 起个名" style="max-width:260px">
+        <button id="btnAddKey">创建 Key</button>
+      </div>
+      <div id="newKey" class="hide card"><p>请立刻复制保存，之后无法再查看：</p><pre id="newKeyText"></pre></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, ...opts });
+  const t = await r.text();
+  let d = {}; try { d = t ? JSON.parse(t) : {}; } catch (e) { d = { error: t }; }
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+};
+const show = (el, on) => el.classList.toggle('hide', !on);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function refresh() {
+  let st;
+  try { st = await api('/api/state'); }
+  catch (e) { show($('secLogin'), true); show($('panel'), false); show($('secSetup'), false); return; }
+  show($('secSetup'), !!st.need_setup);
+  show($('secLogin'), false);
+  show($('panel'), !st.need_setup);
+  if (st.need_setup) return;
+
+  $('tbProviders').innerHTML = (st.providers || []).map(p => `
+    <tr><td>${esc(p.display_name)}<div class="muted">${esc(p.name)}</div></td>
+      <td class="${p.ready ? 'ok' : 'bad'}">${p.ready ? '可用' : '不可用'}</td>
+      <td>${esc(p.detail)}</td>
+      <td class="muted">${(p.models || []).map(esc).join(', ')}</td></tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">无</td></tr>';
+
+  $('tbAccounts').innerHTML = (st.accounts || []).map(a => `
+    <tr><td>${esc(a.name)}</td><td>${esc(a.provider)}</td>
+      <td class="muted">${(a.models || []).map(esc).join(', ') || '默认'}</td>
+      <td>${a.enabled ? '是' : '否'}</td>
+      <td><button onclick="delAccount('${esc(a.id)}')">删除</button></td></tr>`).join('') ||
+    '<tr><td colspan="5" class="muted">还没有账号</td></tr>';
+
+  $('tbKeys').innerHTML = (st.keys || []).map(k => `
+    <tr><td>${esc(k.name)}</td><td><code>${esc(k.prefix)}…</code></td>
+      <td class="muted">${esc((k.created_at || '').slice(0, 10))}</td>
+      <td class="muted">${k.last_used_at ? esc(k.last_used_at.slice(0, 16).replace('T',' ')) : '—'}</td>
+      <td><button onclick="delKey('${esc(k.id)}')">删除</button></td></tr>`).join('') ||
+    '<tr><td colspan="5" class="muted">还没有 Key</td></tr>';
+}
+
+window.delAccount = async id => { if (!confirm('删除这个账号？')) return; await api('/api/accounts/delete?id=' + encodeURIComponent(id), { method: 'POST' }); refresh(); };
+window.delKey = async id => { if (!confirm('删除这个 Key？客户端会立刻失效。')) return; await api('/api/keys/delete?id=' + encodeURIComponent(id), { method: 'POST' }); refresh(); };
+
+$('btnSetup').onclick = async () => {
+  const p = $('setupPwd').value, p2 = $('setupPwd2').value;
+  if (p !== p2) { $('setupMsg').textContent = '两次输入不一致'; return; }
+  try { await api('/api/setup', { method: 'POST', body: JSON.stringify({ password: p }) }); location.reload(); }
+  catch (e) { $('setupMsg').textContent = e.message; }
+};
+$('btnLogin').onclick = async () => {
+  try { await api('/api/login', { method: 'POST', body: JSON.stringify({ password: $('loginPwd').value }) }); location.reload(); }
+  catch (e) { $('loginMsg').textContent = e.message; }
+};
+$('btnLogout').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
+
+$('btnAddAcc').onclick = async () => {
+  const models = $('accModels').value.split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await api('/api/accounts', { method: 'POST', body: JSON.stringify({
+      provider: $('accProvider').value.trim(), name: $('accName').value.trim(),
+      base_url: $('accBase').value.trim(), api_key: $('accKey').value.trim(),
+      models, enabled: true }) });
+    $('accMsg').textContent = '已添加'; $('accName').value = $('accKey').value = $('accModels').value = '';
+    refresh();
+  } catch (e) { $('accMsg').textContent = e.message; }
+};
+
+let authState = '';
+$('btnAuthStart').onclick = async () => {
+  $('authMsg').textContent = '';
+  try {
+    const d = await api('/api/auth/start?provider=copilot', { method: 'POST' });
+    authState = d.state;
+    $('authURL').textContent = d.auth_url;
+    $('authOpen').href = d.auth_url;
+    show($('authStep2'), true);
+  } catch (e) { $('authMsg').textContent = e.message; }
+};
+$('btnCopyAuth').onclick = async () => {
+  try { await navigator.clipboard.writeText($('authURL').textContent); $('btnCopyAuth').textContent = '已复制'; }
+  catch (e) { $('btnCopyAuth').textContent = '复制失败，请手动选中'; }
+};
+$('btnAuthFinish').onclick = async () => {
+  $('authMsg').textContent = '处理中…';
+  try {
+    const d = await api('/api/auth/finish', { method: 'POST', body: JSON.stringify({
+      provider: 'copilot', state: authState,
+      callback: $('authCallback').value, display_name: $('authName').value }) });
+    $('authMsg').textContent = '已添加账号：' + d.name;
+    $('authCallback').value = ''; $('authName').value = '';
+    show($('authStep2'), false);
+    refresh();
+  } catch (e) { $('authMsg').textContent = e.message; }
+};
+$('btnAddKey').onclick = async () => {
+  try {
+    const d = await api('/api/keys', { method: 'POST', body: JSON.stringify({ name: $('keyName').value }) });
+    $('newKeyText').textContent = d.plaintext;
+    show($('newKey'), true);
+    $('keyName').value = '';
+    refresh();
+  } catch (e) { alert(e.message); }
+};
+
+fetch('/healthz').then(r => r.json()).then(d => { $('ver').textContent = 'v' + d.version; }).catch(() => {});
+refresh();
+</script>
+</body>
+</html>
