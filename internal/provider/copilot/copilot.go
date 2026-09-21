@@ -4,33 +4,39 @@
 // 其中 auth 的「设备码授权」按用户要求**不迁移**（用不上）。
 //
 // 与 Agnes 上游的关键差异：Copilot 走 WebSocket 长连接，且连接有生命周期，
-// 因此需要连接池（对应 M365 的 internal/chathub/connpool.go）。
-// 这部分无法用标准库替代，是本项目保留 gorilla/websocket 的唯一原因。
+// 因此需要连接池（chathub 包）。这部分无法用标准库替代，
+// 是本项目保留 gorilla/websocket 的唯一原因。
 //
-// 当前状态：骨架。Models 已可对外暴露，Chat 尚未接通。
+// 账号池、限流、熔断与 Agnes 共用同一份 internal/pool 实现 ——
+// 这正是「互补而非重叠」的落点。
 package copilot
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"aggapi/internal/config"
 	"aggapi/internal/pool"
 	"aggapi/internal/provider"
+	"aggapi/internal/provider/copilot/chathub"
 )
 
 // Provider 实现 provider.Provider。
 type Provider struct {
-	store *config.Store
-	pool  *pool.Pool
+	store  *config.Store
+	pool   *pool.Pool
+	client *chathub.Client
 }
 
 // New 构造 Copilot 上游。
-//
-// 账号池与 Agnes 那边是同一个实现（internal/pool）—— 这正是本项目
-// 「互补而非重叠」的落点：Copilot 也有配额、也会 429、也需要冷却轮换。
 func New(store *config.Store) *Provider {
-	p := &Provider{store: store, pool: pool.New("copilot")}
+	p := &Provider{
+		store:  store,
+		pool:   pool.New("copilot"),
+		client: chathub.NewClient(),
+	}
 	p.pool.Sync(store)
 	return p
 }
@@ -62,12 +68,15 @@ func (p *Provider) DisplayName() string { return "M365 Copilot" }
 // 命名前缀 copilot- 与 Agnes 侧的 agnes- 刻意区分开：
 // 模型名是路由的唯一依据，前缀让用户在客户端里一眼看出走的是哪条链路。
 func (p *Provider) Models() []provider.Model {
+	// 没配账号时也列出模型，让用户能在客户端里先看到链路存在，
+	// 而不是连模型名都找不到、不知道该填什么。
 	return []provider.Model{
 		{
 			ID:       "copilot-auto",
 			Upstream: "auto",
-			Caps:     provider.CapText | provider.CapImage | provider.CapVision | provider.CapDoc | provider.CapStream,
-			Desc:     "Copilot 智能路由（含生图与文档解析）",
+			Caps: provider.CapText | provider.CapImage | provider.CapVision |
+				provider.CapDoc | provider.CapStream,
+			Desc: "Copilot 智能路由（含生图与文档解析）",
 		},
 		{
 			ID:       "copilot-chat",
@@ -84,15 +93,155 @@ func (p *Provider) Models() []provider.Model {
 	}
 }
 
+// Health 用账号池的真实状态报告健康。
 func (p *Provider) Health() provider.Health {
-	return provider.Health{Ready: false, Detail: "尚未接入账号与连接池"}
+	ok, total := p.pool.Healthy()
+	if total == 0 {
+		return provider.Health{Ready: false, Detail: "尚未配置账号"}
+	}
+	if ok == 0 {
+		return provider.Health{
+			Ready:  false,
+			Detail: fmt.Sprintf("%d 个账号全部冷却中", total),
+		}
+	}
+	return provider.Health{
+		Ready:  true,
+		Detail: fmt.Sprintf("%d/%d 个账号可用", ok, total),
+	}
 }
 
+// toChatHubAccount 把配置里的账号翻译成 chathub 需要的凭据。
+//
+// 凭据放在 config.Account.Auth 这个 map 里，而不是给 Account 结构加
+// Copilot 专属字段 —— 账号池要能一视同仁地处理两个上游的账号。
+func toChatHubAccount(a config.Account) (chathub.Account, error) {
+	token := strings.TrimSpace(a.Auth["access_token"])
+	if token == "" {
+		return chathub.Account{}, fmt.Errorf(
+			"%w：账号 %s 缺少 access_token，请在控制台重新授权", provider.ErrAuth, a.Name)
+	}
+	return chathub.Account{
+		AccessToken: token,
+		OID:         a.Auth["oid"],
+		TID:         a.Auth["tid"],
+	}, nil
+}
+
+// Chat 执行一次对话。
 func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
-	return nil, fmt.Errorf("%w：Copilot 上游尚未接通", provider.ErrUnsupported)
+	acct, ok := req.Credential.(config.Account)
+	if !ok {
+		return nil, fmt.Errorf("%w：Copilot 未收到账号凭据", provider.ErrNoCapacity)
+	}
+	ca, err := toChatHubAccount(acct)
+	if err != nil {
+		return nil, err
+	}
+
+	creq := chathub.Request{
+		Text:   joinMessages(req.Messages),
+		Locale: "zh-CN",
+		Market: "zh-CN",
+		// 模型名决定场景：copilot-image 走生图，其余走对话。
+		// 上游用同一个 WebSocket 端点承载两种请求，靠 scenario 区分。
+		Scenario: scenarioFor(req.Model),
+	}
+
+	res, err := p.client.Chat(ctx, ca, creq)
+	if err != nil {
+		return nil, classifyChatErr(err)
+	}
+
+	// 去掉正文里的引用标记（[^1^] 之类），并把被引用的 URL 附在末尾 ——
+	// 客户端看不到 Copilot 的引用面板，不附上等于信息丢失。
+	text, citedURLs := chathub.StripCitationMarkers(res.Text, res.References)
+	if len(citedURLs) > 0 {
+		text += "\n\n参考来源：\n"
+		for i, u := range citedURLs {
+			text += fmt.Sprintf("%d. %s\n", i+1, u)
+		}
+	}
+
+	out := &provider.ChatResponse{
+		Model:   req.Model,
+		Content: strings.TrimRight(text, "\n"),
+		Images:  res.Images,
+	}
+	return out, nil
 }
 
+// classifyChatErr 把 chathub 的错误映射到 provider 的哨兵错误。
+//
+// 这层映射决定了下游看到的状态码：鉴权过期值得让用户去重新授权（502），
+// 配额不足值得让客户端稍后重试（503）。混在一起会让用户无从下手。
+func classifyChatErr(err error) error {
+	var de *chathub.DialError
+	if errors.As(err, &de) {
+		switch {
+		case de.RetryAfter > 0:
+			return fmt.Errorf("%w：上游限流，建议 %d 秒后重试", provider.ErrNoCapacity, de.RetryAfter)
+		default:
+			return fmt.Errorf("%w：%v", provider.ErrUpstream, err)
+		}
+	}
+	msg := err.Error()
+	if chathub.IsContentPolicyBlock(msg) {
+		return fmt.Errorf("%w：请求被上游内容策略拦截", provider.ErrUnsupported)
+	}
+	if strings.Contains(msg, "401") || strings.Contains(msg, "403") ||
+		strings.Contains(strings.ToLower(msg), "unauthorized") {
+		return fmt.Errorf("%w：%v", provider.ErrAuth, err)
+	}
+	return fmt.Errorf("%w：%v", provider.ErrUpstream, err)
+}
+
+// scenarioFor 把模型名映射成上游的 scenario 参数。
+func scenarioFor(model string) string {
+	switch {
+	case strings.Contains(model, "image"):
+		return "image"
+	default:
+		return "chat"
+	}
+}
+
+// joinMessages 把归一化消息拼成上游要的单段文本。
+//
+// Copilot 的 WebSocket 协议一次只接受一段提示词，没有多轮消息数组；
+// 多轮上下文要靠 ConversationID 维持。所以这里把历史消息按角色前缀拼接 ——
+// 虽然不如原生多轮精确，但能保证语义不丢。
+func joinMessages(msgs []provider.Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	// 只有一条 user 消息时直接用原文，不加前缀 ——
+	// 加前缀会污染提示词，影响模型对指令的理解。
+	if len(msgs) == 1 && msgs[0].Role == "user" {
+		return msgs[0].Content
+	}
+	var sb strings.Builder
+	for _, m := range msgs {
+		switch m.Role {
+		case "system":
+			sb.WriteString("[系统] ")
+		case "assistant":
+			sb.WriteString("[助手] ")
+		default:
+			sb.WriteString("[用户] ")
+		}
+		sb.WriteString(m.Content)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// ChatStream 执行一次流式对话。
+//
+// 尚未接通：chathub 已提供 ChatWithDelta，但网关层的 SSE 输出还没做。
+// 明确返回错误而不是静默退化成一次性返回 —— 后者会让客户端的流式解析
+// 收到一个不符合预期的响应。
 func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest, ch chan<- provider.StreamChunk) {
 	defer close(ch)
-	ch <- provider.StreamChunk{Err: fmt.Errorf("%w：Copilot 上游尚未接通", provider.ErrUnsupported)}
+	ch <- provider.StreamChunk{Err: fmt.Errorf("%w：流式尚未接通", provider.ErrUnsupported)}
 }

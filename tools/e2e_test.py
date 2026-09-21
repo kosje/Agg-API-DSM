@@ -147,12 +147,15 @@ def main():
         check("usage 被透传",
               body.get("usage", {}).get("total_tokens") == 10, str(body.get("usage")))
 
-        print("6b) copilot 配了账号但上游未接通，应返回明确的「不支持」")
+        print("6b) copilot 账号缺 access_token，应返回明确的「需要重新授权」")
         st, body = http("POST", base + "/v1/chat/completions",
                         {"model": "copilot-chat", "messages": [{"role": "user", "content": "hi"}]})
-        check("未接通返回 400", st == 400, "%s" % st)
-        check("错误类型为 unsupported",
-              body.get("error", {}).get("type") == "unsupported", str(body))
+        check("缺凭据返回 502", st == 502, "%s" % st)
+        check("错误类型为 upstream_auth",
+              body.get("error", {}).get("type") == "upstream_auth", str(body))
+        check("提示可操作",
+              "重新授权" in body.get("error", {}).get("message", ""),
+              body.get("error", {}).get("message", ""))
 
         print("7) 校验转发到上游的请求")
         st, recv = http("GET", "http://127.0.0.1:%d/__received" % MOCK_PORT)
