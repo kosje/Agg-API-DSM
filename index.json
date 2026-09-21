@@ -1,0 +1,28 @@
+{
+  "packages": [
+    {
+      "package": "agg-api-dsm",
+      "version": "0.1.0-0001",
+      "dname": "Agg-API-DSM",
+      "desc": "Agg-API-DSM 本地网关（群晖 DSM 版）。一个套件同时提供两个上游：Agnes AI 与 M365 Copilot。下游只认一个地址、一个 API Key，由模型名决定走哪条链路（agnes-* / copilot-*）。两个上游共用同一套账号池与 RPM 限流节拍：账号轮换、失败冷却、按负载选账号都是共享的。自带 Web 管理控制台：上游状态、账号管理（Copilot 走浏览器授权，无需设备码）、下游 API Key 管理。服务端口 4444，安装向导可设置管理员口令。升级请在套件中心安装新版 SPK。",
+      "link": "https://github.com/kosje/Agg-API-DSM/releases/download/v0.1.0/agg-api-dsm-0.1.0.spk",
+      "md5": "166a770a532e7b5cce85c60d5bf6b5b2",
+      "size": 2846720,
+      "thumbnail": [
+        "https://kosje.github.io/Agg-API-DSM/icon_72.png"
+      ],
+      "thumbnail_retina": [
+        "https://kosje.github.io/Agg-API-DSM/icon_256.png"
+      ],
+      "qinst": false,
+      "qupgrade": true,
+      "qstart": false,
+      "snapshot": [],
+      "maintainer": "kosje",
+      "maintainer_url": "https://github.com/kosje/Agg-API-DSM",
+      "distributor": "kosje",
+      "distributor_url": "https://github.com/kosje/Agg-API-DSM",
+      "changelog": "首个可用版本：一个套件管两个上游（agnes-* 走 HTTP，copilot-* 走 WebSocket），共用账号池与限流。"
+    }
+  ]
+}
