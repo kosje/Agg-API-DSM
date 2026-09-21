@@ -8,6 +8,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -28,7 +29,8 @@ const sessionTTL = 12 * time.Hour
 
 // Admin 提供管理 API。
 type Admin struct {
-	store *config.Store
+	store  *config.Store
+	router *Router
 	// authProviders 是支持交互式授权的上游，按 Name() 索引。
 	// 用 map 而不是遍历 router：控制台要按名字精确定位，
 	// 且只有部分上游具备这个能力。
@@ -48,6 +50,7 @@ func NewAdmin(store *config.Store, router *Router) *Admin {
 	}
 	return &Admin{
 		store:         store,
+		router:        router,
 		authProviders: aps,
 		sessions:      map[string]time.Time{},
 	}
@@ -65,6 +68,7 @@ func (a *Admin) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/keys/delete", a.handleKeyDelete)
 	mux.HandleFunc("/api/auth/start", a.handleAuthStart)
 	mux.HandleFunc("/api/auth/finish", a.handleAuthFinish)
+	mux.HandleFunc("/api/diag", a.handleDiag)
 }
 
 // ---------- 会话 ----------
@@ -366,6 +370,81 @@ func (a *Admin) handleAuthFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": name})
+}
+
+// handleDiag 对一个上游做一次真实的自检，把完整错误原样返回。
+//
+// 为什么需要它：下游客户端（Cherry Studio 等）只会把失败包装成一句
+// 「模型服务拒绝了测试请求」，看不出到底哪一步错了。控制台里的账号显示
+// 「可用」也只说明账号没在冷却，不代表令牌有效、不代表能连上上游。
+// 这个端点跑一次真实请求，把上游的原话带回来。
+func (a *Admin) handleDiag(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	name := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+
+	var target provider.Provider
+	for _, p := range a.router.Providers() {
+		if p.Name() == name {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, http.StatusNotFound, errObj("没有这个上游："+name))
+		return
+	}
+	if model == "" {
+		if ms := target.Models(); len(ms) > 0 {
+			model = ms[0].ID
+		}
+	}
+
+	out := map[string]any{
+		"provider": name,
+		"model":    model,
+		"health":   target.Health().Detail,
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	lease, err := target.Acquire(ctx, "diag")
+	if err != nil {
+		out["stage"] = "acquire"
+		out["ok"] = false
+		out["error"] = err.Error()
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
+	req := &provider.ChatRequest{
+		Model:      model,
+		Credential: lease.Credential(),
+		Messages: []provider.Message{
+			{Role: "user", Content: `Say "OK" in one word.`},
+		},
+	}
+	start := time.Now()
+	resp, err := target.Chat(ctx, req)
+	out["elapsed_ms"] = time.Since(start).Milliseconds()
+	// 归还时故意带一个错误：自检不该把一个坏账号洗成健康的，
+	// 也不该把粘性指向它。必须在请求之后归还 —— 提前归还会让账号池
+	// 以为它空闲了，可能同时把这个账号再发给别的请求。
+	lease.Release(errors.New("诊断请求"))
+	if err != nil {
+		out["stage"] = "chat"
+		out["ok"] = false
+		out["error"] = err.Error()
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out["stage"] = "done"
+	out["ok"] = true
+	out["reply"] = resp.Content
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ---------- 小工具 ----------

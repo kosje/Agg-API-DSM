@@ -13,6 +13,8 @@ package copilot
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -203,6 +205,77 @@ func (p *Provider) Health() provider.Health {
 	}
 }
 
+// 上游要求的默认参数。这三个**必须填**，留空会被上游直接拒绝 ——
+// 上游协议里没有「默认值」的概念，它期待客户端每次都显式声明。
+//
+// 取值对齐 M365-Copilot2API 的 settings 默认值：
+//
+//	Scenario    = "OfficeWebIncludedCopilot"
+//	LicenseType = "Starter"
+//	Tone        = "magic"（智能路由，由 modelTone 兜底）
+const (
+	defaultScenario    = "OfficeWebIncludedCopilot"
+	defaultLicenseType = "Starter"
+	defaultTone        = "magic"
+)
+
+// toneFor 把对外模型名映射成上游的 tone。
+//
+// 上游用 tone 区分模型与推理深度，不是用模型名。未识别的名字一律回落到
+// "magic"，即交给上游自己智能路由 —— 比猜一个具体 tone 更稳。
+func toneFor(model string) string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "gpt-5.2":
+		return "Gpt_5_2_Chat"
+	case "gpt-5.2-reasoning":
+		return "Gpt_5_2_Reasoning"
+	case "gpt-5.3":
+		return "Gpt_5_3_Chat"
+	case "gpt-5.4":
+		return "Gpt_5_4_Chat"
+	case "gpt-5.4-reasoning":
+		return "Gpt_5_4_Reasoning"
+	case "gpt-5.5":
+		return "Gpt_5_5_Chat"
+	case "gpt-5.5-reasoning":
+		return "Gpt_5_5_Reasoning"
+	case "gpt-5.6-reasoning":
+		return "Gpt_5_6_Reasoning"
+	case "claude", "claude-sonnet":
+		return "Claude_Sonnet"
+	case "claude-sonnet-reasoning":
+		return "Claude_Sonnet_Reasoning"
+	default:
+		return defaultTone
+	}
+}
+
+// extractOIDTID 从 access_token 里解出 oid / tid。
+//
+// 上游要求这两个字段必填，但用户手工粘贴令牌时未必知道它们是什么。
+// access_token 是 JWT，负载里就带着 —— 解出来比让用户去别处找要好。
+func extractOIDTID(accessToken string) (oid, tid string) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", ""
+	}
+	if v, ok := m["oid"].(string); ok {
+		oid = v
+	}
+	if v, ok := m["tid"].(string); ok {
+		tid = v
+	}
+	return oid, tid
+}
+
 // toChatHubAccount 把配置里的账号翻译成 chathub 需要的凭据。
 //
 // 凭据放在 config.Account.Auth 这个 map 里，而不是给 Account 结构加
@@ -213,11 +286,21 @@ func toChatHubAccount(a config.Account) (chathub.Account, error) {
 		return chathub.Account{}, fmt.Errorf(
 			"%w：账号 %s 缺少 access_token，请在控制台重新授权", provider.ErrAuth, a.Name)
 	}
-	return chathub.Account{
-		AccessToken: token,
-		OID:         a.Auth["oid"],
-		TID:         a.Auth["tid"],
-	}, nil
+	oid := strings.TrimSpace(a.Auth["oid"])
+	tid := strings.TrimSpace(a.Auth["tid"])
+	if oid == "" || tid == "" {
+		// 兜底：从令牌里解。上游把 oid/tid 当必填，缺了会直接拒请求，
+		// 而这个错误在上游侧的表象很难懂，不如在这里自己补上。
+		if o, t := extractOIDTID(token); o != "" {
+			oid, tid = o, t
+		}
+	}
+	if oid == "" || tid == "" {
+		return chathub.Account{}, fmt.Errorf(
+			"%w：账号 %s 的凭据里缺少 oid/tid，且无法从令牌中解析，请重新授权",
+			provider.ErrAuth, a.Name)
+	}
+	return chathub.Account{AccessToken: token, OID: oid, TID: tid}, nil
 }
 
 // Chat 执行一次对话。
@@ -234,12 +317,19 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 	}
 
 	creq := chathub.Request{
-		Text:   joinMessages(req.Messages),
-		Locale: "zh-CN",
-		Market: "zh-CN",
-		// 模型名决定场景：copilot-image 走生图，其余走对话。
-		// 上游用同一个 WebSocket 端点承载两种请求，靠 scenario 区分。
-		Scenario: scenarioFor(req.Model),
+		Text: joinMessages(req.Messages),
+		// Tone 决定上游用哪个模型、多深的推理。缺了会被上游拒绝。
+		Tone: toneFor(req.Model),
+		// Scenario 与 LicenseType 同样是上游的必填项，它没有默认值可用 ——
+		// 留空会被直接拒，且上游返回的错误很难懂。
+		Scenario:    defaultScenario,
+		LicenseType: defaultLicenseType,
+		Locale:      "zh-CN",
+		Market:      "zh-CN",
+		TimeZone:    "Asia/Shanghai",
+		DeviceOS:    "Windows",
+		// Started=true 表示这是新一轮对话的起始消息。
+		Started: true,
 	}
 
 	res, err := p.client.Chat(ctx, ca, creq)
@@ -288,16 +378,6 @@ func classifyChatErr(err error) error {
 		return fmt.Errorf("%w：%v", provider.ErrAuth, err)
 	}
 	return fmt.Errorf("%w：%v", provider.ErrUpstream, err)
-}
-
-// scenarioFor 把模型名映射成上游的 scenario 参数。
-func scenarioFor(model string) string {
-	switch {
-	case strings.Contains(model, "image"):
-		return "image"
-	default:
-		return "chat"
-	}
 }
 
 // joinMessages 把归一化消息拼成上游要的单段文本。
