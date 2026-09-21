@@ -128,21 +128,31 @@ type Lease struct {
 	Account config.Account
 	pool    *Pool
 	id      string
+	// sessionKey 记录本次属于哪个会话，成功时据此更新粘性。
+	sessionKey string
 	// Wait 是实际排队等待时长，用于日志。
 	Wait time.Duration
 	// released 防止重复释放导致 strikes 被算两次。
 	released bool
 }
 
+// Credential 返回账号，供 provider 填进请求。
+func (l *Lease) Credential() any { return l.Account }
+
 // Release 归还账号。err 为 nil 表示这次调用成功。
 //
-// 成功会清空连续失败计数并更新粘性；失败会累加计数并可能打开熔断。
+// 成功会清空连续失败计数并更新粘性；失败会累加计数并打开熔断。
 func (l *Lease) Release(err error) {
 	if l == nil || l.released {
 		return
 	}
 	l.released = true
 	l.pool.release(l.id, err)
+	// 只有成功的账号才被记住：把失败账号记成粘性，
+	// 会让同一会话的下一次请求又优先选中它，等于反复踩同一个坑。
+	if err == nil {
+		l.pool.MarkSticky(l.sessionKey, l.id)
+	}
 }
 
 // Acquire 选一个账号并领到发送槽位。
@@ -214,10 +224,11 @@ func (p *Pool) Acquire(ctx context.Context, sessionKey string,
 			continue
 		}
 		return &Lease{
-			Account: c.a.cfg,
-			pool:    p,
-			id:      c.a.cfg.ID,
-			Wait:    wait,
+			Account:    c.a.cfg,
+			pool:       p,
+			id:         c.a.cfg.ID,
+			sessionKey: sessionKey,
+			Wait:       wait,
 		}, nil
 	}
 	return nil, lastErr

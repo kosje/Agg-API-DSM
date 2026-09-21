@@ -5,6 +5,8 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -199,7 +201,19 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := up.Chat(r.Context(), toProviderRequest(req, model))
+	// 从账号池领一个账号。这一步同时完成限流排队与熔断跳过 ——
+	// 网关不关心池是怎么实现的，provider 也不重复实现它。
+	preq := toProviderRequest(req, model)
+	lease, err := up.Acquire(r.Context(), sessionKey(r, preq))
+	if err != nil {
+		writeAPIError(w, errorBody(err))
+		return
+	}
+	preq.Credential = lease.Credential()
+
+	resp, err := up.Chat(r.Context(), preq)
+	// 无论成败都必须归还：漏掉一次，账号池就永久少一个账号。
+	lease.Release(err)
 	if err != nil {
 		writeAPIError(w, errorBody(err))
 		return
@@ -207,6 +221,24 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(toOpenAIResponse(req.Model, resp))
+}
+
+// sessionKey 给账号池的软粘性用：同一会话尽量复用上次成功的账号。
+//
+// 优先用调用方显式给的 X-Session-Id；没有就退化成「首条用户消息的散列」——
+// 同一段对话的开头通常相同，足以把连续几轮请求归到同一个会话。
+// 都不满足时返回空串，表示不做粘性（纯按负载选账号）。
+func sessionKey(r *http.Request, req *provider.ChatRequest) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Session-Id")); v != "" {
+		return "sid:" + v
+	}
+	for _, m := range req.Messages {
+		if m.Role == "user" && m.Content != "" {
+			sum := sha256.Sum256([]byte(m.Content))
+			return "msg:" + hex.EncodeToString(sum[:8])
+		}
+	}
+	return ""
 }
 
 // wantsImage 判断这个请求是不是在要图片。

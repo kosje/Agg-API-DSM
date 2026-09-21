@@ -9,6 +9,7 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -47,6 +48,9 @@ def http(method, url, body=None, headers=None):
 
 
 def main():
+    # 每次运行都从空数据目录开始：否则上一轮写下的配置会残留，
+    # 让「未配置账号」这类前置用例看到不该有的账号。
+    shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(TMP, exist_ok=True)
 
     mock = subprocess.Popen(
@@ -75,10 +79,12 @@ def main():
                         {"model": "不存在的模型", "messages": [{"role": "user", "content": "hi"}]})
         check("未知模型返回 404", st == 404, "%s %s" % (st, body))
 
-        print("3) copilot 上游尚未接通，应返回明确错误而不是 500")
+        print("3) 未配置账号的上游应返回 503 且点明是哪个上游")
         st, body = http("POST", base + "/v1/chat/completions",
                         {"model": "copilot-chat", "messages": [{"role": "user", "content": "hi"}]})
-        check("未接通的上游返回 400", st == 400, "%s" % st)
+        check("无账号返回 503", st == 503, "%s" % st)
+        msg = body.get("error", {}).get("message", "")
+        check("错误信息点明上游", "M365 Copilot" in msg, msg)
 
         print("4) 流式应明确拒绝（尚未接通），而不是静默退化")
         st, body = http("POST", base + "/v1/chat/completions",
@@ -95,14 +101,23 @@ def main():
 
         print("6) 配好账号后走通完整链路")
         cfg = {
-            "accounts": [{
-                "id": "acc-1", "provider": "agnes", "name": "测试账号",
-                "base_url": "http://127.0.0.1:%d" % MOCK_PORT,
-                "api_key": "sk-test-12345",
-                "models": ["agnes-auto", "agnes-image-2.1-flash"],
-                "enabled": True, "rpm": 0,
-                "created_at": "2026-09-21T00:00:00Z",
-            }],
+            "accounts": [
+                {
+                    "id": "acc-1", "provider": "agnes", "name": "测试账号",
+                    "base_url": "http://127.0.0.1:%d" % MOCK_PORT,
+                    "api_key": "sk-test-12345",
+                    "models": ["agnes-auto", "agnes-image-2.1-flash"],
+                    "enabled": True, "rpm": 0,
+                    "created_at": "2026-09-21T00:00:00Z",
+                },
+                {
+                    "id": "acc-2", "provider": "copilot", "name": "Copilot 账号",
+                    "auth": {"token": "fake"},
+                    "models": ["copilot-chat"],
+                    "enabled": True, "rpm": 0,
+                    "created_at": "2026-09-21T00:00:00Z",
+                },
+            ],
             "settings": {"default_rpm": 60, "max_retries": 3, "backoff_base_ms": 100},
         }
         with open(os.path.join(TMP, "config.json"), "w", encoding="utf-8") as f:
@@ -131,6 +146,13 @@ def main():
         check("回复内容来自上游", "mock 回复" in content, content)
         check("usage 被透传",
               body.get("usage", {}).get("total_tokens") == 10, str(body.get("usage")))
+
+        print("6b) copilot 配了账号但上游未接通，应返回明确的「不支持」")
+        st, body = http("POST", base + "/v1/chat/completions",
+                        {"model": "copilot-chat", "messages": [{"role": "user", "content": "hi"}]})
+        check("未接通返回 400", st == 400, "%s" % st)
+        check("错误类型为 unsupported",
+              body.get("error", {}).get("type") == "unsupported", str(body))
 
         print("7) 校验转发到上游的请求")
         st, recv = http("GET", "http://127.0.0.1:%d/__received" % MOCK_PORT)

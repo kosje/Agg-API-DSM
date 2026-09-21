@@ -92,6 +92,11 @@ type ChatRequest struct {
 	Images []string
 	// Docs 是附件（文件名 + 原始字节），由支持 CapDoc 的上游消费。
 	Docs []Document
+	// Credential 是本次请求要用的账号，由网关从账号池领出后填入。
+	//
+	// 类型用 any 是刻意的：凭据的具体形状由各 provider 自己约定，
+	// 这样 provider 接口包不必反向依赖 config，分层才保持单向。
+	Credential any
 	// Raw 保留调用方原始请求体，供上游需要透传字段时使用。
 	Raw map[string]any
 }
@@ -141,6 +146,17 @@ type Health struct {
 	Detail string
 }
 
+// Lease 是一次账号占用。
+//
+// 由各 provider 从共享的账号池里领出，网关负责在请求结束后调用 Release ——
+// 成功与失败必须都归还，否则账号会永久「少一个」。
+type Lease interface {
+	// Credential 返回本次要用的账号，填进 ChatRequest.Credential。
+	Credential() any
+	// Release 归还账号。err 为 nil 表示这次调用成功。
+	Release(err error)
+}
+
 // Provider 是所有上游必须实现的接口。
 //
 // 刻意保持窄：只有「我是谁」「我有哪些模型」「我能不能干活」「干活」四件事。
@@ -154,6 +170,13 @@ type Provider interface {
 	Models() []Model
 	// Health 返回健康状况。
 	Health() Health
+	// Acquire 从账号池领一个账号。网关在转发前调用，转发后必须 Release。
+	//
+	// sessionKey 用于软粘性：同一会话优先复用上次成功的账号。
+	// 传空字符串表示不需要粘性。
+	Acquire(ctx context.Context, sessionKey string) (Lease, error)
+	// Sync 让 provider 重新读取配置（账号增删改后调用）。
+	Sync()
 	// Chat 执行一次对话。ctx 取消时必须尽快返回。
 	Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
 	// ChatStream 执行一次流式对话。实现方把分片写入 ch 并在结束时关闭它。

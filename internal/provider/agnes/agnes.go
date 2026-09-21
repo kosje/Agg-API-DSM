@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"aggapi/internal/config"
+	"aggapi/internal/pool"
 	"aggapi/internal/provider"
 )
 
@@ -41,6 +42,9 @@ var hopByHop = map[string]bool{
 type Provider struct {
 	store  *config.Store
 	client *http.Client
+	// pool 是账号池。它是两个上游共享的实现（internal/pool），
+	// 本包只负责把它接进来，不重复实现轮换 / 限流 / 熔断。
+	pool *pool.Pool
 }
 
 func New(store *config.Store) *Provider {
@@ -50,8 +54,9 @@ func New(store *config.Store) *Provider {
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	return &Provider{
+	p := &Provider{
 		store: store,
+		pool:  pool.New("agnes"),
 		client: &http.Client{
 			Transport: transport,
 			// 不跟重定向：上游用 3xx 表达「换站点」或鉴权问题，
@@ -61,6 +66,30 @@ func New(store *config.Store) *Provider {
 			},
 		},
 	}
+	p.pool.Sync(store)
+	return p
+}
+
+// Sync 重新读取配置。
+func (p *Provider) Sync() { p.pool.Sync(p.store) }
+
+// PoolStats 暴露账号池状态给控制台。
+func (p *Provider) PoolStats() []pool.AccountStat { return p.pool.Stats() }
+
+// Revive 手动复活一个冷却中的账号。
+func (p *Provider) Revive(id string) bool { return p.pool.Revive(id) }
+
+// Acquire 从账号池领一个账号。
+//
+// 失败信息里带上上游名：用户配了 Agnes 但没配 Copilot 时，
+// 光看到「没有可用账号」无法判断该去哪个页面补配置。
+func (p *Provider) Acquire(ctx context.Context, sessionKey string) (provider.Lease, error) {
+	lease, err := p.pool.Acquire(ctx, sessionKey, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w：%s 没有可用账号（%v）",
+			provider.ErrNoCapacity, p.DisplayName(), err)
+	}
+	return lease, nil
 }
 
 func (p *Provider) Name() string        { return "agnes" }
@@ -132,14 +161,23 @@ func capsForModel(name string) provider.Capability {
 	return caps
 }
 
+// Health 用账号池的真实状态报告健康，而不是只数账号个数 ——
+// 「配了 5 个账号但 5 个都在熔断」和「1 个账号健康」是完全不同的状态，
+// 控制台上必须能区分。
 func (p *Provider) Health() provider.Health {
-	accounts := p.store.AccountsFor(p.Name())
-	if len(accounts) == 0 {
+	ok, total := p.pool.Healthy()
+	if total == 0 {
 		return provider.Health{Ready: false, Detail: "尚未配置账号"}
+	}
+	if ok == 0 {
+		return provider.Health{
+			Ready:  false,
+			Detail: fmt.Sprintf("%d 个账号全部冷却中", total),
+		}
 	}
 	return provider.Health{
 		Ready:  true,
-		Detail: fmt.Sprintf("%d 个账号可用", len(accounts)),
+		Detail: fmt.Sprintf("%d/%d 个账号可用", ok, total),
 	}
 }
 
@@ -167,14 +205,14 @@ func upstreamURL(a config.Account, path string) string {
 
 // Chat 执行一次对话。
 //
-// 当前只取第一个可用账号；账号池与限流由网关层接管后，这里会改为
-// 接收网关已选定的账号 —— 协议适配部分（本函数的主体）不需要改。
+// 账号由网关从账号池领出后放进 req.Credential —— 本函数不自己选账号，
+// 那是共享能力的职责。这里只做协议适配：给定账号与请求，转发并解析。
 func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
-	accounts := p.store.AccountsFor(p.Name())
-	if len(accounts) == 0 {
-		return nil, fmt.Errorf("%w：Agnes 尚未配置账号", provider.ErrNoCapacity)
+	acct, ok := req.Credential.(config.Account)
+	if !ok {
+		return nil, fmt.Errorf("%w：Agnes 未收到账号凭据", provider.ErrNoCapacity)
 	}
-	return p.chatWith(ctx, accounts[0], req)
+	return p.chatWith(ctx, acct, req)
 }
 
 // chatWith 用指定账号转发一次请求。

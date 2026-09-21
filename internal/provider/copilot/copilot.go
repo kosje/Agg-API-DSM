@@ -15,20 +15,43 @@ import (
 	"fmt"
 
 	"aggapi/internal/config"
+	"aggapi/internal/pool"
 	"aggapi/internal/provider"
 )
 
 // Provider 实现 provider.Provider。
 type Provider struct {
 	store *config.Store
+	pool  *pool.Pool
 }
 
 // New 构造 Copilot 上游。
 //
-// store 目前只用于将来读取账号；参数先保持一致，
-// 免得接通时还要改装配处的调用签名。
+// 账号池与 Agnes 那边是同一个实现（internal/pool）—— 这正是本项目
+// 「互补而非重叠」的落点：Copilot 也有配额、也会 429、也需要冷却轮换。
 func New(store *config.Store) *Provider {
-	return &Provider{store: store}
+	p := &Provider{store: store, pool: pool.New("copilot")}
+	p.pool.Sync(store)
+	return p
+}
+
+// Sync 重新读取配置。
+func (p *Provider) Sync() { p.pool.Sync(p.store) }
+
+// PoolStats 暴露账号池状态给控制台。
+func (p *Provider) PoolStats() []pool.AccountStat { return p.pool.Stats() }
+
+// Revive 手动复活一个冷却中的账号。
+func (p *Provider) Revive(id string) bool { return p.pool.Revive(id) }
+
+// Acquire 从账号池领一个账号。
+func (p *Provider) Acquire(ctx context.Context, sessionKey string) (provider.Lease, error) {
+	lease, err := p.pool.Acquire(ctx, sessionKey, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w：%s 没有可用账号（%v）",
+			provider.ErrNoCapacity, p.DisplayName(), err)
+	}
+	return lease, nil
 }
 
 func (p *Provider) Name() string        { return "copilot" }
