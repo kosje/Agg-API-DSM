@@ -86,7 +86,9 @@ func (p *Provider) Revive(id string) bool { return p.pool.Revive(id) }
 func (p *Provider) Acquire(ctx context.Context, sessionKey string) (provider.Lease, error) {
 	lease, err := p.pool.Acquire(ctx, sessionKey, 0, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w：%s 没有可用账号（%v）",
+		// 不再把内层 err 也拼进去：它是 "没有可用账号"，
+		// 和这里的措辞重复，读起来像 "没有可用账号（没有可用账号）"。
+		return nil, fmt.Errorf("%w：%s %s",
 			provider.ErrNoCapacity, p.DisplayName(), err)
 	}
 	return lease, nil
