@@ -31,15 +31,29 @@ var catalog = []modelSpec{
 
 	{ID: "gpt-5.2", Tone: "Gpt_5_2_Chat", Desc: "GPT-5.2"},
 	{ID: "gpt-5.2-reasoning", Tone: "Gpt_5_2_Reasoning", Desc: "GPT-5.2 推理"},
+
 	{ID: "gpt-5.3", Tone: "Gpt_5_3_Chat", Desc: "GPT-5.3"},
+	{ID: "gpt-5.3-reasoning", Tone: "Gpt_5_3_Reasoning", Desc: "GPT-5.3 推理"},
+	{ID: "gpt-5.3-think-deeper", Tone: "Gpt_5_3_Chat", Desc: "GPT-5.3 深度思考"},
+
 	{ID: "gpt-5.4", Tone: "Gpt_5_4_Chat", Desc: "GPT-5.4"},
 	{ID: "gpt-5.4-reasoning", Tone: "Gpt_5_4_Reasoning", Desc: "GPT-5.4 推理"},
+	{ID: "gpt-5.4-quick", Tone: "Gpt_5_4_Chat", Desc: "GPT-5.4 快速"},
+	{ID: "gpt-5.4-mini", Tone: "Gpt_5_4_Chat", Desc: "GPT-5.4 Mini"},
+
 	{ID: "gpt-5.5", Tone: "Gpt_5_5_Chat", Desc: "GPT-5.5"},
 	{ID: "gpt-5.5-reasoning", Tone: "Gpt_5_5_Reasoning", Desc: "GPT-5.5 推理"},
+
 	{ID: "gpt-5.6-reasoning", Tone: "Gpt_5_6_Reasoning", Desc: "GPT-5.6 推理"},
+	{ID: "gpt-5.6-sol", Tone: "Gpt_5_6_Reasoning", Desc: "GPT-5.6 Sol"},
+	{ID: "gpt-5.6-terra", Tone: "Gpt_5_6_Reasoning", Desc: "GPT-5.6 Terra"},
+	{ID: "gpt-5.6-luna", Tone: "Gpt_5_6_Reasoning", Desc: "GPT-5.6 Luna"},
 
 	{ID: "claude-sonnet", Tone: "Claude_Sonnet", Desc: "Claude Sonnet"},
 	{ID: "claude-sonnet-reasoning", Tone: "Claude_Sonnet_Reasoning", Desc: "Claude Sonnet 推理"},
+	{ID: "claude", Tone: "Claude_Sonnet", Desc: "Claude Sonnet（别名）"},
+
+	{ID: "codex-auto-review", Tone: "magic", Desc: "代码审查"},
 
 	{ID: "gpt-image-2", Tone: "magic", Desc: "图片生成",
 		Caps: provider.CapImage},

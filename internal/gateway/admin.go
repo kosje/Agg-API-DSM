@@ -165,6 +165,9 @@ func (a *Admin) providerInfo() []map[string]any {
 		if pr, ok := p.(provider.PoolReporter); ok {
 			item["accounts"] = pr.AccountStats()
 		}
+		if ms, ok := p.(provider.ModelSourceReporter); ok {
+			item["model_source"] = ms.ModelSource()
+		}
 		out = append(out, item)
 	}
 	return out

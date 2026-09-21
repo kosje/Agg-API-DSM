@@ -67,11 +67,17 @@ func New(store *config.Store) *Provider {
 		},
 	}
 	p.pool.Sync(store)
+	go p.refreshModels()
 	return p
 }
 
 // Sync 重新读取配置。
-func (p *Provider) Sync() { p.pool.Sync(p.store) }
+func (p *Provider) Sync() {
+	p.pool.Sync(p.store)
+	// 配置变了（可能换了账号或 Key），顺手重查一次上游模型清单。
+	// 不阻塞调用方：拉清单要走网络，不该让保存配置的请求等它。
+	go p.refreshModels()
+}
 
 // PoolStats 暴露账号池状态给控制台。
 func (p *Provider) PoolStats() []pool.AccountStat { return p.pool.Stats() }
@@ -131,71 +137,7 @@ func (p *Provider) ResetAccountStats(id string) bool { return p.pool.ResetStats(
 func (p *Provider) Name() string        { return "agnes" }
 func (p *Provider) DisplayName() string { return "Agnes AI" }
 
-// Models 汇总所有已配置账号声明的模型。
-//
-// 上游支持账号级模型声明，所以清单是动态的：某个账号下线，
-// 它独占的模型就应当从 /v1/models 里消失，而不是留着一个永远 503 的条目。
-func (p *Provider) Models() []provider.Model {
-	accounts := p.store.AccountsFor(p.Name())
-	if len(accounts) == 0 {
-		// 还没配账号时也给一个「占位」模型，让用户能在客户端里先看到链路存在。
-		return []provider.Model{{
-			ID:       "agnes-auto",
-			Upstream: "agnes-auto",
-			Caps: provider.CapText | provider.CapImage | provider.CapVideo |
-				provider.CapStream,
-			Desc: "自动判定文生 / 生图 / 生视频（尚未配置账号）",
-		}}
-	}
 
-	seen := map[string]bool{}
-	var out []provider.Model
-	for _, a := range accounts {
-		for _, m := range a.Models {
-			m = strings.TrimSpace(m)
-			if m == "" || seen[m] {
-				continue
-			}
-			seen[m] = true
-			out = append(out, provider.Model{
-				ID:       m,
-				Upstream: m,
-				Caps:     capsForModel(m),
-				Desc:     "账号 " + a.Name,
-			})
-		}
-	}
-	if len(out) == 0 {
-		out = append(out, provider.Model{
-			ID:       "agnes-auto",
-			Upstream: "agnes-auto",
-			Caps: provider.CapText | provider.CapImage | provider.CapVideo |
-				provider.CapStream,
-			Desc: "自动判定模态",
-		})
-	}
-	return out
-}
-
-// capsForModel 按模型名推断能力位。
-//
-// 上游不返回能力元数据，只能按命名约定判断。约定来自官方模型清单：
-// 名字里带 image / video 的分别是生图、生视频，其余按文本处理。
-// 宁可保守：判错成「支持」会让请求走到上游才失败，判错成「不支持」只是少一个入口。
-func capsForModel(name string) provider.Capability {
-	lower := strings.ToLower(name)
-	caps := provider.CapText | provider.CapStream
-	switch {
-	case strings.Contains(lower, "video"):
-		caps |= provider.CapVideo
-	case strings.Contains(lower, "image"):
-		caps |= provider.CapImage
-	}
-	if strings.Contains(lower, "auto") {
-		caps |= provider.CapImage | provider.CapVideo
-	}
-	return caps
-}
 
 // Health 用账号池的真实状态报告健康，而不是只数账号个数 ——
 // 「配了 5 个账号但 5 个都在熔断」和「1 个账号健康」是完全不同的状态，
@@ -304,7 +246,8 @@ func (p *Provider) buildBody(req *provider.ChatRequest) ([]byte, error) {
 	for k, v := range req.Raw {
 		body[k] = v
 	}
-	body["model"] = req.Model
+	// agnes-auto 是聚合别名，上游不认识它，必须在这里换成真实模型名。
+	body["model"] = p.resolveAuto(req.Model)
 
 	// messages 一律用归一化后的那份重建，**不**沿用 Raw 里的。
 	//

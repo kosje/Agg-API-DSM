@@ -30,6 +30,15 @@
   .card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
   .hide { display: none; }
   code { background: var(--bg2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  /* 模型标签：等宽、可换行、限高避免撑爆表格 */
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 108px; overflow-y: auto; }
+  .chip { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-radius: 10px;
+          font-size: 11px; line-height: 18px; white-space: nowrap; }
+  .chip.primary { border-color: #4a7fd9; }
+  .up-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .up-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .up-name { font-weight: 600; font-size: 14px; }
+  .up-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 </style>
 </head>
 <body>
@@ -63,8 +72,7 @@
   <div id="panel" class="hide">
     <section>
       <h2>上游状态</h2>
-      <table><thead><tr><th>上游</th><th>状态</th><th>说明</th><th>模型</th></tr></thead>
-      <tbody id="tbProviders"></tbody></table>
+      <div id="upstreamBox"></div>
       <div id="poolBox"></div>
     </section>
 
@@ -141,12 +149,24 @@ async function refresh() {
   show($('panel'), !st.need_setup);
   if (st.need_setup) return;
 
-  $('tbProviders').innerHTML = (st.providers || []).map(p => `
-    <tr><td>${esc(p.display_name)}<div class="muted">${esc(p.name)}</div></td>
-      <td class="${p.ready ? 'ok' : 'bad'}">${p.ready ? '可用' : '不可用'}</td>
-      <td>${esc(p.detail)}</td>
-      <td class="muted">${(p.models || []).map(esc).join(', ')}</td></tr>`).join('') ||
-    '<tr><td colspan="4" class="muted">无</td></tr>';
+  // 上游用卡片而不是表格：模型清单是一组变长的标签，
+  // 塞进表格单元格会被挤成一长串逗号分隔的字，既看不清也容易溢出。
+  $('upstreamBox').innerHTML = (st.providers || []).map(p => {
+    const chips = (p.models || []).map(m => `<span class="chip">${esc(m)}</span>`).join('');
+    const src = p.model_source ? `<div class="muted" style="margin-top:8px">模型来源：${esc(p.model_source)}</div>` : '';
+    return `
+      <div class="up-card">
+        <div class="up-head">
+          <span class="up-dot" style="background:${p.ready ? '#2f9e44' : '#d9480f'}"></span>
+          <span class="up-name">${esc(p.display_name)}</span>
+          <span class="muted">${esc(p.name)}</span>
+          <span class="${p.ready ? 'ok' : 'bad'}">${p.ready ? '可用' : '不可用'}</span>
+          <span class="muted">${esc(p.detail)}</span>
+        </div>
+        <div class="chips">${chips || '<span class="muted">无模型</span>'}</div>
+        ${src}
+      </div>`;
+  }).join('') || '<div class="muted">无上游</div>';
 
   // 账号池可视化：把「谁在冷却、排了多少队」摊开。
   // 只看「1/1 个账号可用」看不出瓶颈在哪。

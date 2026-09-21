@@ -245,6 +245,15 @@ type AccountStat struct {
 	LastUsedAt  string `json:"last_used_at,omitempty"`
 }
 
+// ModelSourceReporter 是能说明「模型清单从哪来」的上游。
+//
+// 为什么要暴露这个：控制台显示 agnes-auto 这种占位名时，用户会以为配错了，
+// 而真实原因可能是「还没配账号」或「拉不到上游清单」。把原因写出来就不用猜。
+type ModelSourceReporter interface {
+	Provider
+	ModelSource() string
+}
+
 // PoolReporter 是能报告账号池状态的上游。
 //
 // 可选接口：网关用类型断言探测。控制台要展示「哪个账号在冷却、排了多少队」，
