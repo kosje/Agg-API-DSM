@@ -92,6 +92,27 @@ func (p *Provider) Acquire(ctx context.Context, sessionKey string) (provider.Lea
 	return lease, nil
 }
 
+// AccountStats 实现 provider.PoolReporter，供控制台展示池状态。
+func (p *Provider) AccountStats() []provider.AccountStat {
+	stats := p.pool.Stats()
+	out := make([]provider.AccountStat, 0, len(stats))
+	for _, s := range stats {
+		out = append(out, provider.AccountStat{
+			ID:          s.ID,
+			Name:        s.Name,
+			Healthy:     s.Healthy,
+			Strikes:     s.Strikes,
+			RPM:         int(s.RPM),
+			Waiting:     s.Waiting,
+			CooldownSec: int(s.Cooldown / 1e9),
+		})
+	}
+	return out
+}
+
+// ReviveAccount 实现 provider.PoolReporter。
+func (p *Provider) ReviveAccount(id string) bool { return p.pool.Revive(id) }
+
 func (p *Provider) Name() string        { return "agnes" }
 func (p *Provider) DisplayName() string { return "Agnes AI" }
 
@@ -270,13 +291,16 @@ func (p *Provider) buildBody(req *provider.ChatRequest) ([]byte, error) {
 	}
 	body["model"] = req.Model
 
-	if _, ok := body["messages"]; !ok {
-		msgs := make([]map[string]any, 0, len(req.Messages))
-		for _, m := range req.Messages {
-			msgs = append(msgs, map[string]any{"role": m.Role, "content": m.Content})
-		}
-		body["messages"] = msgs
+	// messages 一律用归一化后的那份重建，**不**沿用 Raw 里的。
+	//
+	// Raw 是透传原始请求体用的，但它会把网关对消息做过的加工全部覆盖掉 ——
+	// 附件解析出来的文本、多模态内容的拍平，都会在这里被悄悄丢掉。
+	// 这个 bug 很难发现：请求成功、上游也回话，只是模型完全没看到附件。
+	msgs := make([]map[string]any, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		msgs = append(msgs, map[string]any{"role": m.Role, "content": m.Content})
 	}
+	body["messages"] = msgs
 	if req.Stream {
 		body["stream"] = true
 	}
@@ -349,15 +373,6 @@ func parseResponse(model string, raw []byte) (*provider.ChatResponse, error) {
 		out.Raw = rawMap
 	}
 	return out, nil
-}
-
-// ChatStream 执行一次流式对话。
-//
-// 尚未接通：上游的 SSE 需要边读边解析并处理跨 chunk 的半行，
-// 留到网关层统一实现（两个上游共用同一套 SSE 解析）。
-func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest, ch chan<- provider.StreamChunk) {
-	defer close(ch)
-	ch <- provider.StreamChunk{Err: fmt.Errorf("%w：流式尚未接通", provider.ErrUnsupported)}
 }
 
 func truncate(s string, n int) string {

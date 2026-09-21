@@ -27,6 +27,21 @@ class Handler(BaseHTTPRequestHandler):
         })
 
         model = RECEIVED[-1]["body"].get("model", "unknown")
+
+        # 流式：按 SSE 分片吐回，模拟真实上游
+        if RECEIVED[-1]["body"].get("stream"):
+            words = ["mock", " 流式", "回复", "：", model]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for w in words:
+                frame = {"choices": [{"index": 0, "delta": {"content": w}}]}
+                self.wfile.write(("data: " + json.dumps(frame) + "\n\n").encode())
+                self.wfile.flush()
+            self.wfile.write(b'data: [DONE]\n\n')
+            self.wfile.flush()
+            return
+
         resp = {
             "id": "chatcmpl-mock",
             "object": "chat.completion",

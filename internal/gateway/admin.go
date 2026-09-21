@@ -69,6 +69,7 @@ func (a *Admin) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/start", a.handleAuthStart)
 	mux.HandleFunc("/api/auth/finish", a.handleAuthFinish)
 	mux.HandleFunc("/api/diag", a.handleDiag)
+	mux.HandleFunc("/api/revive", a.handleRevive)
 }
 
 // ---------- 会话 ----------
@@ -144,18 +145,27 @@ func (a *Admin) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 // providerInfo 汇总各上游的状态，供控制台展示。
+//
+// 池状态（谁在冷却、排了多少队）是排查的关键 —— 只看「1/1 个账号可用」
+// 看不出瓶颈在哪。这里用可选接口探测，不支持的上游就不带这个字段。
 func (a *Admin) providerInfo() []map[string]any {
 	out := []map[string]any{}
-	for name, ap := range a.authProviders {
-		h := ap.Health()
-		out = append(out, map[string]any{
-			"name":         name,
-			"display_name": ap.DisplayName(),
+	for _, p := range a.router.Providers() {
+		h := p.Health()
+		item := map[string]any{
+			"name":         p.Name(),
+			"display_name": p.DisplayName(),
 			"ready":        h.Ready,
 			"detail":       h.Detail,
-			"can_auth":     true,
-			"models":       modelIDs(ap.Models()),
-		})
+			"models":       modelIDs(p.Models()),
+		}
+		if _, ok := a.authProviders[p.Name()]; ok {
+			item["can_auth"] = true
+		}
+		if pr, ok := p.(provider.PoolReporter); ok {
+			item["accounts"] = pr.AccountStats()
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -445,6 +455,35 @@ func (a *Admin) handleDiag(w http.ResponseWriter, r *http.Request) {
 	out["ok"] = true
 	out["reply"] = resp.Content
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRevive 手动把一个冷却中的账号放出来。
+//
+// 为什么要手动：自动冷却到期会复活，但如果用户已经修好了问题
+// （比如换了令牌），没必要干等那 90 秒。
+func (a *Admin) handleRevive(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	provName := r.URL.Query().Get("provider")
+	id := r.URL.Query().Get("id")
+	for _, p := range a.router.Providers() {
+		if p.Name() != provName {
+			continue
+		}
+		pr, ok := p.(provider.PoolReporter)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, errObj("该上游不支持账号池操作"))
+			return
+		}
+		if !pr.ReviveAccount(id) {
+			writeJSON(w, http.StatusNotFound, errObj("账号不存在"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	writeJSON(w, http.StatusNotFound, errObj("没有这个上游："+provName))
 }
 
 // ---------- 小工具 ----------

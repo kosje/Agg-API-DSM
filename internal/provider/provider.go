@@ -213,6 +213,33 @@ type AuthProvider interface {
 	AuthFinish(state, pasted, displayName string) (id, name string, err error)
 }
 
+// AccountStat 是给控制台看的单账号状态。
+//
+// 定义在 provider 而不是 pool 里，是为了让 PoolReporter 这个可选接口
+// 不必把 pool 包的类型泄漏到接口层。pool.AccountStat 是它的实现对应物。
+type AccountStat struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Healthy bool   `json:"healthy"`
+	Strikes int    `json:"strikes"`
+	RPM     int    `json:"rpm"`
+	Waiting int    `json:"waiting"`
+	// CooldownSec 是剩余冷却秒数，0 表示健康。
+	CooldownSec int `json:"cooldown_sec"`
+}
+
+// PoolReporter 是能报告账号池状态的上游。
+//
+// 可选接口：网关用类型断言探测。控制台要展示「哪个账号在冷却、排了多少队」，
+// 这是运维排查的关键信息 —— 只看「1/1 个账号可用」看不出瓶颈在哪。
+type PoolReporter interface {
+	Provider
+	// AccountStats 返回池内每个账号的实时状态。
+	AccountStats() []AccountStat
+	// ReviveAccount 手动把一个冷却中的账号放出来。
+	ReviveAccount(id string) bool
+}
+
 // 网关层的通用错误。上游实现应当用这些包装，便于网关统一映射成 HTTP 状态码。
 var (
 	// ErrNoCapacity 表示上游暂时没有可用账号（全部熔断 / 未配置）。

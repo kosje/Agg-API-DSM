@@ -63,7 +63,7 @@ def main():
     shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(TMP, exist_ok=True)
 
-    exe = os.path.join(ROOT, "dist", "agg-api.exe")
+    exe = os.path.join(ROOT, "dist", "agg-api" + (".exe" if os.name == "nt" else ""))
     if not os.path.exists(exe):
         print("请先构建 dist/agg-api.exe")
         return 1

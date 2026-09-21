@@ -154,6 +154,27 @@ func (p *Provider) Acquire(ctx context.Context, sessionKey string) (provider.Lea
 	return lease, nil
 }
 
+// AccountStats 实现 provider.PoolReporter，供控制台展示池状态。
+func (p *Provider) AccountStats() []provider.AccountStat {
+	stats := p.pool.Stats()
+	out := make([]provider.AccountStat, 0, len(stats))
+	for _, s := range stats {
+		out = append(out, provider.AccountStat{
+			ID:          s.ID,
+			Name:        s.Name,
+			Healthy:     s.Healthy,
+			Strikes:     s.Strikes,
+			RPM:         int(s.RPM),
+			Waiting:     s.Waiting,
+			CooldownSec: int(s.Cooldown / 1e9),
+		})
+	}
+	return out
+}
+
+// ReviveAccount 实现 provider.PoolReporter。
+func (p *Provider) ReviveAccount(id string) bool { return p.pool.Revive(id) }
+
 func (p *Provider) Name() string        { return "copilot" }
 func (p *Provider) DisplayName() string { return "M365 Copilot" }
 
@@ -316,21 +337,7 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 		return nil, err
 	}
 
-	creq := chathub.Request{
-		Text: joinMessages(req.Messages),
-		// Tone 决定上游用哪个模型、多深的推理。缺了会被上游拒绝。
-		Tone: toneFor(req.Model),
-		// Scenario 与 LicenseType 同样是上游的必填项，它没有默认值可用 ——
-		// 留空会被直接拒，且上游返回的错误很难懂。
-		Scenario:    defaultScenario,
-		LicenseType: defaultLicenseType,
-		Locale:      "zh-CN",
-		Market:      "zh-CN",
-		TimeZone:    "Asia/Shanghai",
-		DeviceOS:    "Windows",
-		// Started=true 表示这是新一轮对话的起始消息。
-		Started: true,
-	}
+	creq := buildRequest(req)
 
 	res, err := p.client.Chat(ctx, ca, creq)
 	if err != nil {
@@ -380,6 +387,28 @@ func classifyChatErr(err error) error {
 	return fmt.Errorf("%w：%v", provider.ErrUpstream, err)
 }
 
+// buildRequest 把归一化请求翻译成 chathub 的请求。
+//
+// Chat 与 ChatStream 共用 —— 两条路径的字段必须完全一致，
+// 否则会出现「非流式能用、流式不能用」这种很难查的差异。
+func buildRequest(req *provider.ChatRequest) chathub.Request {
+	return chathub.Request{
+		Text: joinMessages(req.Messages),
+		// Tone 决定上游用哪个模型、多深的推理。缺了会被上游拒绝。
+		Tone: toneFor(req.Model),
+		// Scenario 与 LicenseType 同样是上游的必填项，它没有默认值可用 ——
+		// 留空会被直接拒，且上游返回的错误很难懂。
+		Scenario:    defaultScenario,
+		LicenseType: defaultLicenseType,
+		Locale:      "zh-CN",
+		Market:      "zh-CN",
+		TimeZone:    "Asia/Shanghai",
+		DeviceOS:    "Windows",
+		// Started=true 表示这是新一轮对话的起始消息。
+		Started: true,
+	}
+}
+
 // joinMessages 把归一化消息拼成上游要的单段文本。
 //
 // Copilot 的 WebSocket 协议一次只接受一段提示词，没有多轮消息数组；
@@ -408,14 +437,4 @@ func joinMessages(msgs []provider.Message) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimSpace(sb.String())
-}
-
-// ChatStream 执行一次流式对话。
-//
-// 尚未接通：chathub 已提供 ChatWithDelta，但网关层的 SSE 输出还没做。
-// 明确返回错误而不是静默退化成一次性返回 —— 后者会让客户端的流式解析
-// 收到一个不符合预期的响应。
-func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest, ch chan<- provider.StreamChunk) {
-	defer close(ch)
-	ch <- provider.StreamChunk{Err: fmt.Errorf("%w：流式尚未接通", provider.ErrUnsupported)}
 }

@@ -190,13 +190,14 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 流式尚未接通：明确拒绝而不是静默退化成一次性返回 ——
-	// 后者会让客户端的流式解析逻辑收到一个不符合预期的响应。
-	if req.Stream {
+	// 附件先于路由处理：解析失败要能直接返回 400，而不是把请求发出去
+	// 再拿回一个语焉不详的上游错误。
+	images, docText, err := parseAttachments(req.Raw)
+	if err != nil {
 		writeAPIError(w, &APIError{
-			Code:    http.StatusNotImplemented,
-			Message: "流式尚未接通，请先设置 stream=false",
-			Type:    "not_implemented",
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+			Type:    "invalid_attachment",
 		})
 		return
 	}
@@ -204,12 +205,26 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 从账号池领一个账号。这一步同时完成限流排队与熔断跳过 ——
 	// 网关不关心池是怎么实现的，provider 也不重复实现它。
 	preq := toProviderRequest(req, model)
+	preq.Images = images
+	attachDocs(preq, docText)
 	lease, err := up.Acquire(r.Context(), sessionKey(r, preq))
 	if err != nil {
 		writeAPIError(w, errorBody(err))
 		return
 	}
 	preq.Credential = lease.Credential()
+	// 流式请求要一直用到连接结束才归还账号，否则账号会在流还没结束时
+	// 被池子判成空闲、同时发给别的请求。非流式路径在下面立即归还。
+	preq.Stream = req.Stream
+
+	if req.Stream {
+		// 流式的成败由 streamChat 内部判断：它会把错误写进流里，
+		// 所以这里拿不到明确的 err。约定是「返回即代表这次账号调用结束」，
+		// 用 nil 归还 —— 真正的失败已经通过流告诉客户端了。
+		defer lease.Release(nil)
+		h.streamChat(w, r, up, model.Upstream, req.Model, preq)
+		return
+	}
 
 	resp, err := up.Chat(r.Context(), preq)
 	// 无论成败都必须归还：漏掉一次，账号池就永久少一个账号。

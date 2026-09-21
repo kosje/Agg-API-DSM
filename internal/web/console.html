@@ -65,6 +65,7 @@
       <h2>上游状态</h2>
       <table><thead><tr><th>上游</th><th>状态</th><th>说明</th><th>模型</th></tr></thead>
       <tbody id="tbProviders"></tbody></table>
+      <div id="poolBox"></div>
     </section>
 
     <section>
@@ -147,6 +148,22 @@ async function refresh() {
       <td class="muted">${(p.models || []).map(esc).join(', ')}</td></tr>`).join('') ||
     '<tr><td colspan="4" class="muted">无</td></tr>';
 
+  // 账号池可视化：把「谁在冷却、排了多少队」摊开。
+  // 只看「1/1 个账号可用」看不出瓶颈在哪。
+  const pools = (st.providers || []).filter(p => p.accounts && p.accounts.length);
+  $('poolBox').innerHTML = pools.map(p => `
+    <h3 style="font-size:13px;font-weight:500;margin:14px 0 6px">${esc(p.display_name)} 账号池</h3>
+    <table><thead><tr><th>账号</th><th>状态</th><th>RPM</th><th>排队</th><th>连续失败</th><th></th></tr></thead>
+    <tbody>${p.accounts.map(a => `
+      <tr>
+        <td>${esc(a.name)}</td>
+        <td class="${a.healthy ? 'ok' : 'bad'}">${a.healthy ? '可用' : '冷却 ' + a.cooldown_sec + 's'}</td>
+        <td>${a.rpm || '不限'}</td>
+        <td>${a.waiting || 0}</td>
+        <td>${a.strikes || 0}</td>
+        <td>${a.healthy ? '' : `<button onclick="revive('${esc(p.name)}','${esc(a.id)}')">立即复活</button>`}</td>
+      </tr>`).join('')}</tbody></table>`).join('');
+
   $('tbAccounts').innerHTML = (st.accounts || []).map(a => `
     <tr><td>${esc(a.name)}</td><td>${esc(a.provider)}</td>
       <td class="muted">${(a.models || []).map(esc).join(', ') || '默认'}</td>
@@ -163,6 +180,10 @@ async function refresh() {
 }
 
 window.delAccount = async id => { if (!confirm('删除这个账号？')) return; await api('/api/accounts/delete?id=' + encodeURIComponent(id), { method: 'POST' }); refresh(); };
+window.revive = async (provider, id) => {
+  await api('/api/revive?provider=' + encodeURIComponent(provider) + '&id=' + encodeURIComponent(id), { method: 'POST' });
+  refresh();
+};
 window.delKey = async id => { if (!confirm('删除这个 Key？客户端会立刻失效。')) return; await api('/api/keys/delete?id=' + encodeURIComponent(id), { method: 'POST' }); refresh(); };
 
 $('btnSetup').onclick = async () => {
