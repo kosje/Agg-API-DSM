@@ -70,6 +70,16 @@ func main() {
 		log.Fatalf("初始化数据目录失败：%v", err)
 	}
 
+	// 安装向导设的口令重置。
+	//
+	// 由 SPK 生命周期脚本通过环境变量指过来。读完就删：只认「有文件」这一个
+	// 信号，所以重装并填一个新口令能重置忘记的口令，而日常重启不会覆盖
+	// 用户在控制台改过的口令。
+	//
+	// 用文件而不是直接把口令放进环境变量：后者会让明文口令在整个服务
+	// 运行期间留在 /proc/<pid>/environ 里，同用户的任何进程都能读到。
+	applyPasswordReset(store)
+
 	router := gateway.NewRouter()
 
 	// 装配上游。新增上游只需在这里加一行 —— 网关核心不需要任何改动。
@@ -136,8 +146,18 @@ func main() {
 	})
 
 	addr := net.JoinHostPort(*host, *port)
+
+	// 先绑定，成功了再打日志。
+	//
+	// 顺序很重要：SPK 的生命周期脚本靠日志里的 "listening on" 判断启动成功，
+	// 如果先打日志再绑定，端口被占用时那行日志已经写出去了，
+	// 脚本会把它当成启动成功 —— 用户看到「已启动」但访问不通，很难查。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("监听 %s 失败：%v", addr, err)
+	}
+
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
@@ -146,12 +166,12 @@ func main() {
 		os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("agg-api %s 已启动  监听 %s  数据目录 %s", version, addr, *dataDir)
+	log.Printf("agg-api %s listening on %s (数据目录 %s)", version, addr, *dataDir)
 	log.Printf("上游：%s", upstreamSummary(router))
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("监听失败：%v", err)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("服务异常退出：%v", err)
 		}
 	}()
 
@@ -163,6 +183,37 @@ func main() {
 		log.Printf("关闭超时：%v", err)
 	}
 	log.Println("agg-api 已停止。")
+}
+
+// applyPasswordReset 消费安装向导留下的口令重置文件。
+//
+// 文件格式：第一行是明文口令。读成功后无论设置成败都删除 ——
+// 留着会让每次重启都重置一次，把用户后来在控制台改的口令冲掉。
+func applyPasswordReset(store *config.Store) {
+	path := strings.TrimSpace(os.Getenv("AGG_ADMIN_PASSWORD_RESET_FILE"))
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("读取口令重置文件失败（忽略）：%v", err)
+		return
+	}
+	// 先删再用：万一后面 panic，也不至于让明文口令一直躺在磁盘上。
+	_ = os.Remove(path)
+
+	pw := strings.TrimSpace(string(data))
+	if pw == "" {
+		return
+	}
+	if err := store.SetAdminPassword(pw); err != nil {
+		// 口令不合规（例如少于 12 位）不算致命：服务照常起来，
+		// 用户可以在控制台重新设一个。直接退出会让套件「装上了却起不来」，
+		// 那比口令没设上更难排查。
+		log.Printf("向导口令不合规，已忽略（可在控制台重设）：%v", err)
+		return
+	}
+	log.Printf("已应用安装向导设置的管理端口令")
 }
 
 func env(key, fallback string) string {

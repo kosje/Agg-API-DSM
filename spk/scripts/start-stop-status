@@ -1,0 +1,163 @@
+#!/bin/sh
+# Agg-API-DSM — Synology DSM 7 服务控制
+#
+# DSM 生命周期变量：
+#   $SYNOPKG_PKGDEST  /var/packages/<pkg>/target
+#   $SYNOPKG_PKGVAR   /var/packages/<pkg>/var
+#   $SYNOPKG_TEMP_LOGFILE  临时日志文件（错误信息写这里，DSM 会弹给用户）
+
+set -eu
+
+PKG="agg-api-dsm"
+APP_DIR="${SYNOPKG_PKGDEST:-/var/packages/$PKG/target}"
+VAR_DIR="${SYNOPKG_PKGVAR:-/var/packages/$PKG/var}"
+DATA_DIR="$VAR_DIR/data"
+LOGFILE="${SYNOPKG_TEMP_LOGFILE:-/tmp/$PKG.log}"
+
+# 安装向导里设的口令由 postinst 落到这里。服务启动时读它、用掉、然后删掉。
+# 只认「有文件」这一个信号：这样重装并填一个**新**口令能重置忘记的口令，
+# 而日常重启不会覆盖用户在控制台改过的口令。
+RESET_PW="$VAR_DIR/admin-password-reset"
+APPLOG="$DATA_DIR/app.log"
+PIDFILE="$VAR_DIR/$PKG.pid"
+LOG_MAX_BYTES=5242880
+
+# 端口固定 4444（INFO 的 adminport、防火墙配置、向导文案三处一致），
+# 不从向导读，避免出现「向导填了但 INFO 没跟上」的不一致。
+PORT="4444"
+
+# 必须监听所有网卡：这个套件的意义就是给局域网客户端提供一个
+# OpenAI 兼容端点，只听回环等于没用。
+#
+# 代价是控制台也会以明文 HTTP 暴露在局域网上，登录口令与会话 Cookie
+# 会在网络上明文传输。若网络不可信，请用群晖反向代理套一层 HTTPS。
+# 环境变量 AGG_LISTEN 优先级更高，运维可用它限制网卡或前置 TLS 终结。
+LISTEN="${AGG_LISTEN:-0.0.0.0:$PORT}"
+
+BIN=""
+for cand in "$APP_DIR/bin/agg-api" "$APP_DIR/agg-api"; do
+    if [ -x "$cand" ]; then
+        BIN="$cand"
+        break
+    fi
+done
+
+running() {
+    [ -n "$BIN" ] || return 1
+    [ -f "$PIDFILE" ] || return 1
+    pid="$(cat "$PIDFILE" 2>/dev/null)"
+    [ -n "$pid" ] || return 1
+    # 确认这个 pid 还是我们的二进制，而不是被复用的号码。
+    [ -d "/proc/$pid" ] || return 1
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null)"
+    # 显式判空：BIN 为空时下面的模式会退化成 ""，把一次失败的 readlink
+    # 当成匹配成功，从而把已死的服务报成运行中。
+    [ -n "$exe" ] && case "$exe" in
+        "$BIN"|"$BIN "*) return 0 ;;
+    esac
+    # 非 root 可能读不到 readlink，退回 cmdline 判断。
+    if grep -qs "agg-api" "/proc/$pid/cmdline"; then
+        return 0
+    fi
+    return 1
+}
+
+case "$1" in
+    start)
+        if [ -z "$BIN" ]; then
+            echo "binary not found under $APP_DIR" > "$LOGFILE"
+            exit 1
+        fi
+        if running; then
+            exit 0
+        fi
+
+        mkdir -p "$DATA_DIR" || { echo "cannot create $DATA_DIR" > "$LOGFILE"; exit 1; }
+        # 数据目录里有上游凭据与口令散列，只给属主。
+        chmod 700 "$DATA_DIR" 2>/dev/null || true
+
+        # 先把日志建出来再量大小。
+        # 不能直接 `wc -c < "$APPLOG"`：文件不存在时失败的是**重定向**，
+        # 那个错误由 shell 自己报，`2>/dev/null` 盖不住，会写到 stderr。
+        # 而 DSM 会把生命周期脚本的 stderr 当成错误弹给用户 ——
+        # 一次完全正常的启动却弹出报错对话框，很误导。
+        [ -f "$APPLOG" ] || : > "$APPLOG"
+
+        # 日志要有上限：每次启动都追加，没有别的轮转机制，
+        # 无人值守的 NAS 上会一直涨。
+        LOG_SIZE="$(wc -c < "$APPLOG" 2>/dev/null || echo 0)"
+        if [ "${LOG_SIZE:-0}" -gt "$LOG_MAX_BYTES" ]; then
+            mv -f "$APPLOG" "$APPLOG.1" 2>/dev/null || true
+        fi
+        LOG_OFFSET="$(wc -c < "$APPLOG" 2>/dev/null || echo 0)"
+
+        HOST="${LISTEN%%:*}"
+        if [ -s "$RESET_PW" ]; then
+            AGG_ADMIN_PASSWORD_RESET_FILE="$RESET_PW"
+            export AGG_ADMIN_PASSWORD_RESET_FILE
+        fi
+
+        cd "$(dirname "$BIN")" || exit 1
+        nohup "$BIN" -host "$HOST" -port "$PORT" -data "$DATA_DIR" >> "$APPLOG" 2>&1 &
+        echo $! > "$PIDFILE"
+
+        # 等监听就绪。只检查进程不够：nohup 立刻返回，
+        # 端口被占用导致绑定失败时也会被报成「启动成功」。
+        # 所以要看服务真的打出监听那行日志，且只算本次启动产生的输出。
+        i=0
+        started=0
+        while [ "$i" -lt 30 ]; do
+            if ! running; then
+                break
+            fi
+            if [ -n "${LOG_OFFSET:-}" ] && \
+               tail -c "+$((LOG_OFFSET + 1))" "$APPLOG" 2>/dev/null | grep -q "listening on"; then
+                started=1
+                break
+            fi
+            i=$((i + 1))
+            sleep 1
+        done
+        if [ "$started" = 1 ]; then
+            exit 0
+        fi
+        echo "failed to start $BIN (no listener after ${i}s); see $APPLOG" > "$LOGFILE"
+        exit 1
+        ;;
+
+    stop)
+        if running; then
+            pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+            # 每次 kill 都要兜住失败：在 set -e 下未兜住的失败会跳过
+            # PID 文件清理，把「本来就已经停了」报成非零退出。
+            kill "$pid" 2>/dev/null || true
+            i=0
+            while [ "$i" -lt 20 ]; do
+                running || break
+                i=$((i + 1))
+                sleep 1
+            done
+            if running; then
+                kill -9 "$pid" 2>/dev/null || true
+                sleep 1
+            fi
+        fi
+        rm -f "$PIDFILE"
+        exit 0
+        ;;
+
+    status)
+        running && exit 0
+        exit 1
+        ;;
+
+    log)
+        echo "$APPLOG"
+        exit 0
+        ;;
+
+    *)
+        echo "usage: $0 {start|stop|status|log}" > "$LOGFILE"
+        exit 1
+        ;;
+esac

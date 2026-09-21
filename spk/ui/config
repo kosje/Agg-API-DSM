@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "com.kosje.aggapi": {
+            "type": "url",
+            "title": "Agg-API-DSM",
+            "desc": "一个套件管两个上游：Agnes AI 与 M365 Copilot",
+            "icon": "images/icon_{0}.png",
+            "protocol": "http",
+            "port": "4444",
+            "url": "/",
+            "allUsers": true
+        }
+    }
+}

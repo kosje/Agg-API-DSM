@@ -10,6 +10,9 @@
 # SPK 构建暂存目录（由 spk/build-spk.sh 生成）
 /.spkbuild/
 
+# 套件源产物：它属于 gh-pages 分支，不该出现在 main 上
+/.gh-pages/
+
 # 测试与临时产物
 __pycache__/
 *.log
